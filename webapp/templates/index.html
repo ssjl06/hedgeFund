@@ -42,15 +42,18 @@
 <div id="spinner" class="spinner-overlay d-none">
   <div class="text-center">
     <div class="spinner-border text-primary" style="width:3rem;height:3rem;" role="status"></div>
-    <p class="mt-3 fw-semibold text-secondary" id="spinner-text">Downloading data & optimizing...</p>
+    <p class="mt-3 fw-semibold text-secondary" id="spinner-text">데이터 다운로드 및 최적화 진행 중...</p>
   </div>
 </div>
 
 <!-- Navbar -->
 <nav class="navbar navbar-light bg-white shadow-sm mb-4">
-  <div class="container">
-    <span class="brand">📊 CVaR Portfolio Optimizer</span>
-    <span class="text-muted small">Mean-CVaR · Rockafellar-Uryasev (2000)</span>
+  <div class="container d-flex justify-content-between align-items-center">
+    <span class="brand">CVaR Portfolio Optimizer</span>
+    <div>
+      <button class="btn btn-outline-secondary btn-sm me-2" data-bs-toggle="modal" data-bs-target="#helpModal">사용법</button>
+      <span class="text-muted small d-none d-md-inline">Mean-CVaR · Rockafellar-Uryasev (2000)</span>
+    </div>
   </div>
 </nav>
 
@@ -59,20 +62,20 @@
   <!-- ===== LEFT: Input Panel ===== -->
   <div class="col-lg-4">
     <div class="card p-4">
-      <h5 class="mb-3">Parameters</h5>
+      <h5 class="mb-3">매개변수 설정</h5>
 
       <!-- Presets -->
       <div class="mb-3">
-        <label class="form-label">Quick Presets</label>
+        <label class="form-label">빠른 프리셋</label>
         <div id="preset-buttons" class="d-flex flex-wrap gap-1"></div>
       </div>
 
       <!-- Ticker input -->
       <div class="mb-3">
-        <label class="form-label">Tickers</label>
+        <label class="form-label">종목 코드 (최소 2개)</label>
         <div class="input-group input-group-sm">
-          <input type="text" id="ticker-input" class="form-control" placeholder="e.g. AAPL" />
-          <button class="btn btn-outline-primary" onclick="addTicker()">Add</button>
+          <input type="text" id="ticker-input" class="form-control" placeholder="예: AAPL, 005930.KS" />
+          <button class="btn btn-outline-primary" onclick="addTicker()">추가</button>
         </div>
         <div id="ticker-container" class="mt-2"></div>
       </div>
@@ -80,26 +83,28 @@
       <!-- Date range -->
       <div class="row mb-3">
         <div class="col-6">
-          <label class="form-label">Start Date</label>
+          <label class="form-label">시작일</label>
           <input type="date" id="start-date" class="form-control form-control-sm" value="{{ default_start }}" />
         </div>
         <div class="col-6">
-          <label class="form-label">End Date</label>
+          <label class="form-label">종료일</label>
           <input type="date" id="end-date" class="form-control form-control-sm" value="{{ today }}" />
         </div>
       </div>
 
       <!-- Confidence level -->
       <div class="mb-3">
-        <label class="form-label">CVaR Confidence Level (β): <span id="beta-val">0.95</span></label>
+        <label class="form-label">CVaR 신뢰수준 (β): <span id="beta-val">0.95</span>
+          <br /><small class="text-muted">높을수록 극단적 손실에 초점 (보통 0.95)</small>
+        </label>
         <input type="range" class="form-range" id="confidence" min="0.90" max="0.99" step="0.01" value="0.95"
                oninput="document.getElementById('beta-val').textContent=this.value" />
       </div>
 
       <!-- Risk aversion -->
       <div class="mb-3">
-        <label class="form-label">Risk Aversion (λ): <span id="lambda-val">0.50</span>
-          <br /><small class="text-muted">0 = min risk &nbsp;|&nbsp; 1 = max return</small>
+        <label class="form-label">위험 회피도 (λ): <span id="lambda-val">0.50</span>
+          <br /><small class="text-muted">0에 가까울수록 안전 추구 · 1에 가까울수록 수익 추구</small>
         </label>
         <input type="range" class="form-range" id="risk-aversion" min="0.0" max="1.0" step="0.05" value="0.50"
                oninput="document.getElementById('lambda-val').textContent=parseFloat(this.value).toFixed(2)" />
@@ -108,17 +113,17 @@
       <!-- Weight bounds -->
       <div class="row mb-3">
         <div class="col-6">
-          <label class="form-label">Min Weight</label>
+          <label class="form-label">최소 비중</label>
           <input type="number" id="min-weight" class="form-control form-control-sm" value="0.00" min="0" max="1" step="0.01" />
         </div>
         <div class="col-6">
-          <label class="form-label">Max Weight</label>
+          <label class="form-label">최대 비중</label>
           <input type="number" id="max-weight" class="form-control form-control-sm" value="1.00" min="0" max="1" step="0.01" />
         </div>
       </div>
 
       <button class="btn btn-primary w-100 mt-2" id="run-btn" onclick="runOptimization()">
-        Run Optimization
+        최적화 실행
       </button>
     </div>
   </div>
@@ -133,10 +138,10 @@
     <!-- Weight table -->
     <div id="weight-section" class="d-none mb-4">
       <div class="card p-3">
-        <h6 class="mb-2">Optimal Weights</h6>
+        <h6 class="mb-2">최적 포트폴리오 비중</h6>
         <div class="table-responsive">
           <table class="table table-sm weight-table mb-0">
-            <thead><tr><th>Ticker</th><th>Weight (%)</th><th>Bar</th></tr></thead>
+            <thead><tr><th>종목</th><th>비중 (%)</th><th>비율</th></tr></thead>
             <tbody id="weight-tbody"></tbody>
           </table>
         </div>
@@ -159,14 +164,130 @@
 
     <!-- Placeholder -->
     <div id="placeholder" class="text-center py-5 text-muted">
-      <h4>Set your parameters and click <strong>Run Optimization</strong></h4>
-      <p>The engine solves a Mean-CVaR linear program (Rockafellar-Uryasev formulation)<br/>
-         using historical return scenarios, then backtests the result.</p>
+      <h4>왼쪽에서 매개변수를 설정하고 <strong>최적화 실행</strong>을 눌러주세요</h4>
+      <p class="mt-3 mb-0">과거 주가 데이터를 기반으로 Mean-CVaR 선형계획법을 풀어<br/>
+         최적의 포트폴리오 비중을 산출하고, 백테스트 결과를 차트로 보여드립니다.</p>
     </div>
   </div>
 </div>
 </div>
 
+<!-- Help / About Modal -->
+<div class="modal fade" id="helpModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">CVaR 포트폴리오 최적화 안내</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" style="line-height:1.8">
+
+        <h6 class="fw-bold mt-2">CVaR(Conditional Value-at-Risk)란?</h6>
+        <p>
+          CVaR은 <strong>"최악의 상황에서 평균적으로 얼마나 잃을 수 있는가"</strong>를 측정하는 위험 지표입니다.
+          예를 들어 <em>95% CVaR이 -3%</em>라면, 가장 나쁜 5%의 날에 평균 3%의 손실이 예상된다는 뜻입니다.
+        </p>
+        <p>
+          전통적인 표준편차(변동성) 기반의 평균-분산 모델(Markowitz, 1952)과 달리,
+          CVaR은 <strong>꼬리 위험(tail risk)</strong>을 직접 측정하여 극단적 시장 상황에서의
+          손실을 더 정확히 반영합니다.
+        </p>
+        <div class="alert alert-light border small">
+          <strong>이론적 배경:</strong> Rockafellar &amp; Uryasev (2000),
+          "Optimization of Conditional Value-at-Risk", <em>Journal of Risk</em>, 2, 21-42.<br/>
+          CVaR 최적화는 선형계획법(LP)으로 변환할 수 있어 대규모 포트폴리오에도 효율적으로 풀 수 있습니다.
+        </div>
+
+        <hr/>
+        <h6 class="fw-bold">사용 방법</h6>
+        <ol>
+          <li>
+            <strong>종목 선택</strong> &mdash;
+            Yahoo Finance 티커 코드를 입력합니다.
+            <ul class="small text-muted mb-1">
+              <li>미국 주식: <code>AAPL</code>, <code>MSFT</code>, <code>NVDA</code></li>
+              <li>한국 주식: <code>005930.KS</code> (삼성전자), <code>000660.KS</code> (SK하이닉스)</li>
+              <li>ETF: <code>SPY</code>, <code>QQQ</code>, <code>GLD</code></li>
+            </ul>
+            또는 <em>빠른 프리셋</em> 버튼으로 미리 구성된 포트폴리오를 선택할 수 있습니다.
+          </li>
+          <li>
+            <strong>기간 설정</strong> &mdash;
+            분석에 사용할 과거 주가 데이터의 시작/종료 날짜를 지정합니다.
+            기간이 길수록 더 많은 시나리오로 분석하지만, 오래된 데이터는 현재 시장을 반영하지 못할 수 있습니다.
+          </li>
+          <li>
+            <strong>CVaR 신뢰수준 (β)</strong> &mdash;
+            꼬리 위험을 측정할 범위를 설정합니다.
+            <ul class="small text-muted mb-1">
+              <li><code>0.95</code> = 하위 5% 최악의 날 기준 (일반적 설정)</li>
+              <li><code>0.99</code> = 하위 1% 극단적 상황 기준 (매우 보수적)</li>
+            </ul>
+          </li>
+          <li>
+            <strong>위험 회피도 (λ)</strong> &mdash;
+            수익과 위험 사이의 균형을 결정합니다.
+            <ul class="small text-muted mb-1">
+              <li><code>0.0</code> = 위험 최소화 (보수적 투자자)</li>
+              <li><code>0.5</code> = 균형 잡힌 접근 (기본값)</li>
+              <li><code>1.0</code> = 수익 최대화 (공격적 투자자)</li>
+            </ul>
+          </li>
+          <li>
+            <strong>비중 제한</strong> &mdash;
+            개별 종목의 최소/최대 비중을 제한합니다.
+            예: 최대 0.30으로 설정하면 한 종목에 30% 이상 집중되지 않습니다.
+          </li>
+          <li>
+            <strong>최적화 실행</strong> 버튼을 누르면 최신 데이터를 다운로드하고
+            최적 비중을 계산합니다.
+          </li>
+        </ol>
+
+        <hr/>
+        <h6 class="fw-bold">결과 차트 설명</h6>
+        <table class="table table-sm small">
+          <tr><td class="fw-semibold" style="width:35%">포트폴리오 비중</td>
+              <td>각 종목에 투자 자금을 어떤 비율로 배분해야 하는지 보여줍니다.</td></tr>
+          <tr><td class="fw-semibold">누적 수익률</td>
+              <td>최적화된 포트폴리오 vs 동일 비중 포트폴리오 vs 개별 종목의 성과를 비교합니다.</td></tr>
+          <tr><td class="fw-semibold">효율적 프론티어</td>
+              <td>위험(CVaR)과 수익의 최적 조합 곡선입니다. 곡선 위의 점이 현재 선택된 포트폴리오입니다.</td></tr>
+          <tr><td class="fw-semibold">수익률 분포</td>
+              <td>일별 수익률의 분포와 함께 VaR/CVaR 위치를 표시합니다.</td></tr>
+          <tr><td class="fw-semibold">상관관계 행렬</td>
+              <td>종목 간 수익률 상관관계를 보여줍니다. 상관관계가 낮을수록 분산 효과가 큽니다.</td></tr>
+          <tr><td class="fw-semibold">드로우다운</td>
+              <td>최고점 대비 하락폭을 보여줍니다. 최대 드로우다운이 작을수록 안정적인 포트폴리오입니다.</td></tr>
+        </table>
+
+        <hr/>
+        <h6 class="fw-bold">주요 지표 설명</h6>
+        <table class="table table-sm small">
+          <tr><td class="fw-semibold" style="width:35%">기대 연간 수익률</td>
+              <td>과거 데이터 기반으로 추정한 연간 기대 수익률입니다.</td></tr>
+          <tr><td class="fw-semibold">CVaR (조건부 위험)</td>
+              <td>최악의 시나리오에서 예상되는 일평균 손실률입니다.</td></tr>
+          <tr><td class="fw-semibold">연간 변동성</td>
+              <td>수익률의 연간 표준편차로, 가격 변동의 크기를 나타냅니다.</td></tr>
+          <tr><td class="fw-semibold">샤프 비율</td>
+              <td>(수익률 - 무위험이자율) / 변동성. 1 이상이면 양호, 2 이상이면 우수합니다.</td></tr>
+        </table>
+
+        <div class="alert alert-warning small mt-3">
+          <strong>주의:</strong> 이 도구는 과거 데이터를 기반으로 한 분석 도구이며, 미래 수익을 보장하지 않습니다.
+          투자 결정은 본인의 판단과 책임 하에 이루어져야 합니다.
+        </div>
+
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">닫기</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 // ===== Ticker management =====
 let tickers = [];
@@ -204,7 +325,7 @@ fetch('/api/presets').then(r => r.json()).then(presets => {
 
 // ===== Run optimization =====
 async function runOptimization() {
-  if (tickers.length < 2) { alert('Please add at least 2 tickers.'); return; }
+  if (tickers.length < 2) { alert('종목을 2개 이상 추가해주세요.'); return; }
 
   const spinner = document.getElementById('spinner');
   spinner.classList.remove('d-none');
@@ -227,11 +348,11 @@ async function runOptimization() {
       body: JSON.stringify(body),
     });
     const data = await resp.json();
-    if (data.error) { alert('Error: ' + data.error); return; }
+    if (data.error) { alert('오류: ' + data.error); return; }
 
     showResults(data);
   } catch (err) {
-    alert('Request failed: ' + err.message);
+    alert('요청 실패: ' + err.message);
   } finally {
     spinner.classList.add('d-none');
     document.getElementById('run-btn').disabled = false;
@@ -244,12 +365,12 @@ function showResults(data) {
 
   // summary cards
   const metrics = [
-    { label: 'Expected Return', value: s.expected_return + '%', color: '#667eea' },
-    { label: 'CVaR (95%)', value: s.cvar + '%', color: '#e74c3c' },
-    { label: 'Volatility', value: s.volatility + '%', color: '#f39c12' },
-    { label: 'Sharpe Ratio', value: s.sharpe_ratio, color: '#2ecc71' },
-    { label: 'Data Points', value: s.data_points, color: '#8e44ad' },
-    { label: 'Date Range', value: s.date_range, color: '#34495e' },
+    { label: '기대 연간 수익률', value: s.expected_return + '%', color: '#667eea' },
+    { label: 'CVaR (조건부 위험)', value: s.cvar + '%', color: '#e74c3c' },
+    { label: '연간 변동성', value: s.volatility + '%', color: '#f39c12' },
+    { label: '샤프 비율', value: s.sharpe_ratio, color: '#2ecc71' },
+    { label: '분석 데이터 수', value: s.data_points + '일', color: '#8e44ad' },
+    { label: '분석 기간', value: s.date_range, color: '#34495e' },
   ];
   document.getElementById('summary-cards').innerHTML = metrics.map(m => `
     <div class="col-md-4 col-6">

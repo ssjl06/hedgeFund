@@ -26,7 +26,7 @@ def weights_chart(result: OptimizationResult) -> dict:
     fig = make_subplots(
         rows=1, cols=2,
         specs=[[{"type": "pie"}, {"type": "bar"}]],
-        subplot_titles=["Allocation (Pie)", "Allocation (Bar)"],
+        subplot_titles=["비중 (파이)", "비중 (막대)"],
     )
     fig.add_trace(
         go.Pie(labels=tickers, values=values, textinfo="label+percent",
@@ -40,7 +40,7 @@ def weights_chart(result: OptimizationResult) -> dict:
         row=1, col=2,
     )
     fig.update_layout(
-        title_text="Optimal Portfolio Weights",
+        title_text="최적 포트폴리오 비중",
         height=420,
         showlegend=False,
         template="plotly_white",
@@ -57,7 +57,7 @@ def cumulative_returns_chart(result: OptimizationResult) -> dict:
 
     fig.add_trace(go.Scatter(
         x=idx, y=result.cumulative_portfolio.values,
-        mode="lines", name="Optimised Portfolio",
+        mode="lines", name="최적 포트폴리오",
         line=dict(color="crimson", width=2.5),
     ))
 
@@ -69,15 +69,16 @@ def cumulative_returns_chart(result: OptimizationResult) -> dict:
     for i, col in enumerate(result.cumulative_benchmark.columns):
         dash = "dash" if col == "EqualWeight" else "dot"
         width = 2 if col == "EqualWeight" else 1.2
+        label = "동일비중" if col == "EqualWeight" else col
         fig.add_trace(go.Scatter(
             x=idx, y=result.cumulative_benchmark[col].values,
-            mode="lines", name=col,
+            mode="lines", name=label,
             line=dict(color=colors[i % len(colors)], width=width, dash=dash),
         ))
 
     fig.update_layout(
-        title="Cumulative Returns: Portfolio vs Benchmarks",
-        xaxis_title="Date", yaxis_title="Growth of $1",
+        title="누적 수익률: 최적 포트폴리오 vs 벤치마크",
+        xaxis_title="날짜", yaxis_title="$1 투자 시 성장",
         height=480, template="plotly_white",
         legend=dict(orientation="h", y=-0.15),
     )
@@ -101,18 +102,18 @@ def efficient_frontier_chart(result: OptimizationResult) -> dict:
         mode="lines+markers",
         marker=dict(size=6, color="steelblue"),
         line=dict(color="steelblue", width=2),
-        name="Efficient Frontier",
+        name="효율적 프론티어",
     ))
     # mark the chosen portfolio
     fig.add_trace(go.Scatter(
         x=[result.cvar], y=[result.expected_return],
         mode="markers",
         marker=dict(size=14, color="crimson", symbol="star"),
-        name="Selected Portfolio",
+        name="선택된 포트폴리오",
     ))
     fig.update_layout(
-        title="Mean-CVaR Efficient Frontier",
-        xaxis_title="CVaR (%)", yaxis_title="Expected Annual Return (%)",
+        title="Mean-CVaR 효율적 프론티어",
+        xaxis_title="CVaR (%)", yaxis_title="기대 연간 수익률 (%)",
         height=460, template="plotly_white",
     )
     return _to_json(fig)
@@ -131,7 +132,7 @@ def return_distribution_chart(result: OptimizationResult) -> dict:
         nbinsx=80,
         marker_color="steelblue",
         opacity=0.75,
-        name="Daily Return",
+        name="일별 수익률",
     ))
 
     beta = 0.95  # default
@@ -144,8 +145,8 @@ def return_distribution_chart(result: OptimizationResult) -> dict:
                   annotation_text=f"CVaR {beta:.0%}: {cvar_val*100:.2f}%")
 
     fig.update_layout(
-        title="Portfolio Daily Return Distribution with VaR & CVaR",
-        xaxis_title="Daily Return (%)", yaxis_title="Count",
+        title="포트폴리오 일별 수익률 분포 (VaR & CVaR)",
+        xaxis_title="일별 수익률 (%)", yaxis_title="빈도",
         height=420, template="plotly_white",
     )
     return _to_json(fig)
@@ -166,7 +167,7 @@ def correlation_chart(result: OptimizationResult) -> dict:
         texttemplate="%{text}",
     ))
     fig.update_layout(
-        title="Asset Return Correlation Matrix",
+        title="종목 간 수익률 상관관계 행렬",
         height=450, template="plotly_white",
     )
     return _to_json(fig)
@@ -186,11 +187,11 @@ def drawdown_chart(result: OptimizationResult) -> dict:
         fill="tozeroy",
         fillcolor="rgba(220,53,69,0.25)",
         line=dict(color="crimson", width=1.5),
-        name="Drawdown",
+        name="드로우다운",
     ))
     fig.update_layout(
-        title="Portfolio Drawdown",
-        xaxis_title="Date", yaxis_title="Drawdown (%)",
+        title="포트폴리오 드로우다운 (최고점 대비 하락폭)",
+        xaxis_title="날짜", yaxis_title="드로우다운 (%)",
         height=380, template="plotly_white",
     )
     return _to_json(fig)
