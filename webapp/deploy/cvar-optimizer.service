@@ -1,0 +1,35 @@
+# /etc/systemd/system/cvar-optimizer.service
+#
+# Systemd service for CVaR Portfolio Optimizer
+# Copy this file:
+#   sudo cp deploy/cvar-optimizer.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now cvar-optimizer
+
+[Unit]
+Description=CVaR Portfolio Optimizer (Gunicorn)
+After=network.target
+
+[Service]
+Type=notify
+User=user
+Group=user
+WorkingDirectory=/home/user/hedgeFund/webapp
+ExecStart=/usr/local/bin/gunicorn -c deploy/gunicorn.conf.py app:app
+ExecReload=/bin/kill -s HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=30
+
+# Environment
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+
+# Hardening
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/log/cvar-optimizer /home/user/hedgeFund/webapp
+
+[Install]
+WantedBy=multi-user.target

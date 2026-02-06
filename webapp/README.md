@@ -7,39 +7,114 @@ into an interactive web interface.
 ## Architecture
 
 ```
-User Input (tickers, dates, risk params)
-        │
-        ▼
-  Flask Web Server (app.py)
-        │
-        ▼
-  Optimization Engine (optimizer.py)
-   ├─ yfinance: download latest price data
-   ├─ Scenario generation: historical returns
-   └─ scipy.optimize.linprog: solve Mean-CVaR LP
-        │
-        ▼
-  Chart Generator (charts.py)
-   └─ Plotly: 6 interactive charts
-        │
-        ▼
-  Frontend (index.html)
-   └─ Bootstrap 5 + Plotly.js
+Browser (any device on LAN / internet)
+    │
+    ▼
+Windows Host (:80)  ←  port forwarding (netsh portproxy)
+    │
+    ▼
+WSL2 Nginx (:80)    ←  reverse proxy, gzip, static files
+    │
+    ▼
+Gunicorn (:8000)    ←  multi-worker WSGI server
+    │
+    ▼
+Flask App (app.py)
+    ├─ optimizer.py  →  yfinance + scipy Mean-CVaR LP
+    └─ charts.py     →  Plotly interactive charts
 ```
 
-## Quick Start
+## Quick Start (Development)
 
 ```bash
 cd webapp
 pip install -r requirements.txt
 python app.py
-# → http://localhost:5000
+# → http://localhost:5000 (only you can access)
 ```
 
-Or use the launch script:
+## Production Deployment (LAN accessible)
+
+### Step 1: WSL2 side (one-time setup)
+
 ```bash
-./run.sh          # dev mode  (port 5000)
-./run.sh --prod   # gunicorn  (port 8000)
+cd /home/user/hedgeFund/webapp
+sudo bash deploy/setup.sh
+```
+
+This installs and starts:
+- Nginx (reverse proxy on port 80)
+- Gunicorn (app server on port 8000)
+- Log files in `/var/log/cvar-optimizer/`
+
+### Step 2: Windows side (re-run after each WSL restart)
+
+Open **PowerShell as Administrator**:
+
+```powershell
+cd \\wsl$\Ubuntu\home\user\hedgeFund\webapp\deploy
+.\windows-port-forward.ps1
+```
+
+This creates:
+- Port forwarding: Windows:80 → WSL2:80
+- Firewall rule allowing inbound TCP 80
+
+### Step 3: Access
+
+```
+Your machine:     http://localhost
+LAN colleagues:   http://<your-windows-ip>
+```
+
+Find your Windows IP with `ipconfig` in CMD.
+
+### Management commands
+
+```bash
+# Check status
+ps aux | grep gunicorn
+sudo service nginx status
+
+# Restart
+sudo service nginx restart
+pkill -HUP -f gunicorn
+
+# Logs
+tail -f /var/log/cvar-optimizer/access.log
+tail -f /var/log/cvar-optimizer/error.log
+tail -f /var/log/nginx/cvar-optimizer.error.log
+
+# Stop everything
+pkill -f gunicorn
+sudo service nginx stop
+```
+
+### Teardown (Windows side)
+
+```powershell
+.\windows-port-forward.ps1 -Remove
+```
+
+## File Structure
+
+```
+webapp/
+├── app.py                      # Flask application
+├── optimizer.py                # Mean-CVaR optimization engine
+├── charts.py                   # Plotly chart generators
+├── templates/
+│   └── index.html              # Frontend (Bootstrap 5 + Plotly.js)
+├── static/                     # Static assets (served by Nginx)
+├── requirements.txt            # Python dependencies
+├── run.sh                      # Dev/prod launcher
+├── deploy/
+│   ├── setup.sh                # One-command WSL deployment
+│   ├── nginx.conf              # Nginx reverse proxy config
+│   ├── gunicorn.conf.py        # Gunicorn production config
+│   ├── cvar-optimizer.service  # Systemd service unit
+│   └── windows-port-forward.ps1  # Windows port forwarding
+└── README.md
 ```
 
 ## User Inputs

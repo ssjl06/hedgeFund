@@ -15,6 +15,13 @@ from charts import generate_all_charts
 
 app = Flask(__name__)
 
+# Trust X-Forwarded-* headers from Nginx reverse proxy
+try:
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+except ImportError:
+    pass
+
 
 @app.route("/")
 def index():
