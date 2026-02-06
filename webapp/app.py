@@ -5,13 +5,20 @@ Flask application wrapping the Mean-CVaR pipeline from
 NVIDIA's cvar_basic.ipynb notebook into an interactive web UI.
 """
 
+import sys
 import traceback
 from datetime import date, timedelta
 
+print("[startup] Loading Flask...", flush=True)
 from flask import Flask, render_template, request, jsonify
 
+print("[startup] Loading optimizer...", flush=True)
 from optimizer import OptimizationParams, run_optimization
+
+print("[startup] Loading charts...", flush=True)
 from charts import generate_all_charts
+
+print("[startup] All modules loaded.", flush=True)
 
 app = Flask(__name__)
 

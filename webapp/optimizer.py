@@ -21,11 +21,12 @@ from dataclasses import dataclass, field
 # ---------------------------------------------------------------------------
 # Try to import NVIDIA GPU-accelerated libraries; fall back to scipy
 # ---------------------------------------------------------------------------
+GPU_AVAILABLE = False
 try:
     import cufolio  # noqa: F401
     GPU_AVAILABLE = True
-except ImportError:
-    GPU_AVAILABLE = False
+except (ImportError, Exception):
+    pass
 
 
 # ---------------------------------------------------------------------------
