@@ -11,7 +11,7 @@ Description=CVaR Portfolio Optimizer (Gunicorn)
 After=network.target
 
 [Service]
-Type=notify
+Type=simple
 User=user
 Group=user
 WorkingDirectory=/home/user/hedgeFund/webapp

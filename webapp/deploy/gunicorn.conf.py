@@ -13,7 +13,8 @@ backlog = 256
 
 # Worker processes
 workers = min(multiprocessing.cpu_count() * 2 + 1, 8)
-worker_class = "sync"
+worker_class = "gthread"
+threads = 4
 timeout = 180          # optimization can take time on large portfolios
 graceful_timeout = 30
 keepalive = 5

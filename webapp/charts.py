@@ -135,7 +135,7 @@ def return_distribution_chart(result: OptimizationResult) -> dict:
         name="일별 수익률",
     ))
 
-    beta = 0.95  # default
+    beta = result.confidence_level
     var_val = np.percentile(port_daily.values, (1 - beta) * 100)
     cvar_val = port_daily[port_daily <= var_val].mean()
 

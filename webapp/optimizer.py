@@ -19,17 +19,6 @@ from dataclasses import dataclass, field
 
 
 # ---------------------------------------------------------------------------
-# Try to import NVIDIA GPU-accelerated libraries; fall back to scipy
-# ---------------------------------------------------------------------------
-GPU_AVAILABLE = False
-try:
-    import cufolio  # noqa: F401
-    GPU_AVAILABLE = True
-except (ImportError, Exception):
-    pass
-
-
-# ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
 @dataclass
@@ -37,11 +26,12 @@ class OptimizationParams:
     tickers: list[str]
     start_date: str
     end_date: str
-    confidence_level: float = 0.95       # β for CVaR
-    risk_aversion: float = 0.5           # λ  (0=min-risk, 1=max-return)
+    confidence_level: float = 0.95       # beta for CVaR
+    risk_aversion: float = 0.5           # lambda  (0=min-risk, 1=max-return)
     min_weight: float = 0.0              # per-asset lower bound
     max_weight: float = 1.0              # per-asset upper bound
     target_return: float | None = None   # optional target return constraint
+    risk_free_rate: float = 0.04         # annualised risk-free rate
 
 
 @dataclass
@@ -51,6 +41,7 @@ class OptimizationResult:
     cvar: float
     volatility: float
     sharpe_ratio: float
+    confidence_level: float
     prices_df: pd.DataFrame
     returns_df: pd.DataFrame
     cumulative_portfolio: pd.Series
@@ -59,11 +50,43 @@ class OptimizationResult:
 
 
 # ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+def validate_params(params: OptimizationParams) -> None:
+    """Validate optimization parameters. Raises ValueError on bad input."""
+    if not (0.90 <= params.confidence_level <= 0.99):
+        raise ValueError(
+            f"confidence_level must be in [0.90, 0.99], got {params.confidence_level}. "
+            "A value of 1.0 causes division by zero in the CVaR formulation."
+        )
+    if not (0.0 <= params.risk_aversion <= 1.0):
+        raise ValueError(
+            f"risk_aversion must be in [0.0, 1.0], got {params.risk_aversion}."
+        )
+    if not (-1.0 <= params.min_weight <= 1.0):
+        raise ValueError(
+            f"min_weight must be in [-1.0, 1.0], got {params.min_weight}."
+        )
+    if not (-1.0 <= params.max_weight <= 1.0):
+        raise ValueError(
+            f"max_weight must be in [-1.0, 1.0], got {params.max_weight}."
+        )
+    if params.min_weight > params.max_weight:
+        raise ValueError(
+            f"min_weight ({params.min_weight}) must be <= max_weight ({params.max_weight})."
+        )
+    if len(params.tickers) < 2:
+        raise ValueError(
+            f"At least 2 tickers are required, got {len(params.tickers)}."
+        )
+
+
+# ---------------------------------------------------------------------------
 # 1. Data preparation
 # ---------------------------------------------------------------------------
 def fetch_prices(tickers: list[str], start: str, end: str) -> pd.DataFrame:
     """Download adjusted close prices via yfinance."""
-    df = yf.download(tickers, start=start, end=end, auto_adjust=True)
+    df = yf.download(tickers, start=start, end=end, auto_adjust=True, timeout=30)
     if isinstance(df.columns, pd.MultiIndex):
         df = df["Close"]
     if isinstance(df, pd.Series):
@@ -73,8 +96,8 @@ def fetch_prices(tickers: list[str], start: str, end: str) -> pd.DataFrame:
 
 
 def compute_returns(prices: pd.DataFrame) -> pd.DataFrame:
-    """Simple daily log-returns."""
-    return np.log(prices / prices.shift(1)).dropna()
+    """Simple daily returns."""
+    return (prices / prices.shift(1) - 1).dropna()
 
 
 # ---------------------------------------------------------------------------
@@ -95,17 +118,19 @@ def optimize_cvar(
 ) -> tuple[np.ndarray, float]:
     """
     Solve:
-        max   λ * μ'w  -  (1-λ) * CVaR_β(w)
+        max   lambda * mu'w  -  (1-lambda) * CVaR_beta(w)
 
     Reformulated as LP  (minimisation):
-        min  -(λ) * μ'w  +  (1-λ) * [ α + 1/((1-β)*S) * Σ z_s ]
+        min  -(lambda) * mu'w  +  (1-lambda) * [ alpha + 1/((1-beta)*S) * sum z_s ]
 
-        s.t.  z_s  >=  -(r_s' w) - α       ∀s
-              z_s  >=  0                     ∀s
-              Σ w_i = 1
+        s.t.  z_s  >=  -(r_s' w) - alpha       for all s
+              z_s  >=  0                         for all s
+              sum w_i = 1
               lo <= w_i <= hi
 
-    Decision variables:  x = [w_1..w_N, α, z_1..z_S]
+    Decision variables:  x = [w_1..w_N, alpha, z_1..z_S]
+
+    Returns (weights, cvar) where cvar is derived from the LP solution.
     """
     S, N = scenarios.shape
     beta = params.confidence_level
@@ -116,28 +141,28 @@ def optimize_cvar(
 
     # ---- objective ----
     c = np.zeros(n_vars)
-    # weights part:  -λ * μ
+    # weights part:  -lambda * mu
     c[:N] = -lam * mean_returns
-    # alpha part:  (1-λ) * 1
+    # alpha part:  (1-lambda) * 1
     c[N] = (1 - lam)
-    # z part:  (1-λ) / ((1-β)*S)
+    # z part:  (1-lambda) / ((1-beta)*S)
     c[N + 1:] = (1 - lam) / ((1 - beta) * S)
 
-    # ---- inequality constraints:  z_s >= -r_s'w - α  →  r_s'w + α + z_s >= 0
-    #      linprog format:  A_ub @ x <= b_ub   →  -(r_s'w + α + z_s) <= 0
+    # ---- inequality constraints:  z_s >= -r_s'w - alpha  ->  r_s'w + alpha + z_s >= 0
+    #      linprog format:  A_ub @ x <= b_ub   ->  -(r_s'w + alpha + z_s) <= 0
     A_ub = np.zeros((S, n_vars))
     A_ub[:, :N] = -scenarios          # -r_s * w
-    A_ub[:, N] = -1.0                 # -α
+    A_ub[:, N] = -1.0                 # -alpha
     for s in range(S):
         A_ub[s, N + 1 + s] = -1.0    # -z_s
     b_ub = np.zeros(S)
 
-    # ---- equality: Σ w_i = 1
+    # ---- equality: sum w_i = 1
     A_eq = np.zeros((1, n_vars))
     A_eq[0, :N] = 1.0
     b_eq = np.array([1.0])
 
-    # optional target-return constraint:  μ'w >= target  →  -μ'w <= -target
+    # optional target-return constraint:  mu'w >= target  ->  -mu'w <= -target
     if params.target_return is not None:
         row = np.zeros((1, n_vars))
         row[0, :N] = -mean_returns
@@ -148,7 +173,7 @@ def optimize_cvar(
     bounds = []
     for _ in range(N):
         bounds.append((params.min_weight, params.max_weight))
-    bounds.append((None, None))  # α unbounded
+    bounds.append((None, None))  # alpha unbounded
     for _ in range(S):
         bounds.append((0, None))  # z_s >= 0
 
@@ -159,12 +184,11 @@ def optimize_cvar(
         raise RuntimeError(f"Optimization failed: {result.message}")
 
     weights = result.x[:N]
-    alpha = result.x[N]
 
-    # compute CVaR from solution
-    losses = -scenarios @ weights
-    var = np.percentile(losses, beta * 100)
-    cvar = losses[losses >= var].mean() if (losses >= var).any() else var
+    # compute CVaR directly from the LP solution variables
+    alpha = result.x[N]
+    z_values = result.x[N + 1:]
+    cvar = alpha + z_values.sum() / ((1 - beta) * S)
 
     return weights, cvar
 
@@ -178,7 +202,7 @@ def compute_efficient_frontier(
     params: OptimizationParams,
     n_points: int = 30,
 ) -> list[dict]:
-    """Trace frontier by varying risk_aversion λ from 0 to 1."""
+    """Trace frontier by varying risk_aversion lambda from 0 to 1."""
     frontier = []
     for lam in np.linspace(0.01, 0.99, n_points):
         p = OptimizationParams(
@@ -233,11 +257,32 @@ def backtest(
 # Public API
 # ---------------------------------------------------------------------------
 def run_optimization(params: OptimizationParams) -> OptimizationResult:
-    """Full pipeline: data → scenarios → optimise → backtest."""
+    """Full pipeline: data -> scenarios -> optimise -> backtest."""
+
+    # 0. validate
+    validate_params(params)
 
     # 1. data
     prices = fetch_prices(params.tickers, params.start_date, params.end_date)
+
+    if prices.empty:
+        raise ValueError("No price data found for the given tickers and date range.")
+
     returns = compute_returns(prices)
+
+    if len(returns) < 30:
+        raise ValueError(
+            f"Insufficient data: only {len(returns)} trading days found. "
+            "At least 30 required."
+        )
+
+    # check for tickers dropped entirely
+    missing = set(params.tickers) - set(returns.columns)
+    if missing:
+        raise ValueError(
+            f"No data returned for ticker(s): {', '.join(sorted(missing))}. "
+            "Check symbols and date range."
+        )
 
     # 2. scenarios
     scenarios = generate_scenarios(returns)
@@ -255,7 +300,7 @@ def run_optimization(params: OptimizationParams) -> OptimizationResult:
     # summary stats
     port_return = float(mean_ret @ weights) * 252
     port_vol = float(np.sqrt((scenarios @ weights).var()) * np.sqrt(252))
-    rf = 0.04  # rough risk-free rate
+    rf = params.risk_free_rate
     sharpe = (port_return - rf) / port_vol if port_vol > 0 else 0.0
 
     weight_dict = {t: round(float(w), 6) for t, w in zip(params.tickers, weights)}
@@ -266,6 +311,7 @@ def run_optimization(params: OptimizationParams) -> OptimizationResult:
         cvar=round(cvar * 100, 4),
         volatility=round(port_vol * 100, 2),
         sharpe_ratio=round(sharpe, 4),
+        confidence_level=params.confidence_level,
         prices_df=prices,
         returns_df=returns,
         cumulative_portfolio=cum_port,

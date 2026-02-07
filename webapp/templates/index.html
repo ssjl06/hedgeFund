@@ -4,7 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>CVaR Portfolio Optimizer</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YcnS/1pGQ/FaPbqhvOEP7sCI4MKLqIuYbDVz" crossorigin="anonymous" />
+  <!-- Plotly CDN does not provide official SRI hashes, so SRI is omitted -->
   <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
   <style>
     :root { --accent: #0d6efd; }
@@ -287,15 +288,21 @@
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
 <script>
 // ===== Ticker management =====
 let tickers = [];
 
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
 function renderTickers() {
   const c = document.getElementById('ticker-container');
   c.innerHTML = tickers.map((t, i) =>
-    `<span class="ticker-badge">${t}<button onclick="removeTicker(${i})">&times;</button></span>`
+    `<span class="ticker-badge">${escapeHtml(t)}<button onclick="removeTicker(${i})">&times;</button></span>`
   ).join('');
 }
 function addTicker() {
@@ -376,7 +383,7 @@ function showResults(data) {
     <div class="col-md-4 col-6">
       <div class="summary-card" style="background:${m.color}">
         <h6>${m.label}</h6>
-        <div class="value">${m.value}</div>
+        <div class="value">${escapeHtml(m.value)}</div>
       </div>
     </div>
   `).join('');
@@ -387,10 +394,10 @@ function showResults(data) {
   tbody.innerHTML = sorted.map(([tk, w]) => {
     const pct = (w * 100).toFixed(2);
     return `<tr>
-      <td class="fw-semibold">${tk}</td>
-      <td>${pct}%</td>
+      <td class="fw-semibold">${escapeHtml(tk)}</td>
+      <td>${escapeHtml(pct)}%</td>
       <td><div class="progress" style="height:18px">
-        <div class="progress-bar" style="width:${pct}%">${pct > 5 ? pct + '%' : ''}</div>
+        <div class="progress-bar" style="width:${pct}%">${pct > 5 ? escapeHtml(pct) + '%' : ''}</div>
       </div></td>
     </tr>`;
   }).join('');
