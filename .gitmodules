@@ -1,0 +1,3 @@
+[submodule "quantitative-portfolio-optimization"]
+	path = quantitative-portfolio-optimization
+	url = https://github.com/NVIDIA-AI-Blueprints/quantitative-portfolio-optimization.git
