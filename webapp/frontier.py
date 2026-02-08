@@ -18,7 +18,7 @@ from cufolio.cvar_data import CvarData
 
 from optimizer import (
     fetch_prices, _build_returns_dict, _generate_scenarios,
-    _detect_solver_settings,
+    _has_cuopt, _cuopt_api_settings, _cuopt_solver_settings, _cvxpy_api_settings,
 )
 
 logger = logging.getLogger(__name__)
@@ -90,8 +90,6 @@ def compute_logarithmic_frontier(
         params.min_exp, params.max_exp, params.n_steps
     )[::-1]  # high to low like NVIDIA's code
 
-    solver_settings = _detect_solver_settings()
-
     # Build base CvarParameters
     cvar_params = CvarParameters(
         w_min=params.min_weight,
@@ -103,79 +101,75 @@ def compute_logarithmic_frontier(
         confidence=params.confidence_level,
     )
 
-    # Build the CVaR problem once, then sweep risk_aversion
-    try:
-        cvar_problem = cvar_optimizer.CVaR(
-            returns_dict=returns_dict,
-            cvar_params=cvar_params,
-        )
-    except Exception as e:
-        logger.warning("Failed to create CVaR problem: %s", e)
-        raise RuntimeError(f"CVaR 문제 생성 실패: {e}")
+    # Determine API: cuOpt Python API (PDLP GPU) first, CVXPY CLARABEL fallback
+    use_cuopt = _has_cuopt()
 
     points = []
     tickers = returns_dict["tickers"]
     covariance = returns_dict["covariance"]
 
-    for i, ra_value in enumerate(risk_aversion_list):
+    def _solve_one_point(ra_value):
+        """Solve a single frontier point. Returns FrontierPoint or None."""
+        cvar_params.risk_aversion = ra_value
+
+        # cuOpt Python API: must rebuild problem each time because risk_aversion
+        # is baked into the objective as a float constant (not a CVXPY Parameter).
+        if use_cuopt:
+            try:
+                prob = cvar_optimizer.CVaR(
+                    returns_dict=returns_dict,
+                    cvar_params=cvar_params,
+                    api_settings=_cuopt_api_settings(),
+                )
+                result_row, portfolio = prob.solve_optimization_problem(
+                    solver_settings=_cuopt_solver_settings(),
+                    print_results=False,
+                )
+                return _make_point(ra_value, result_row, portfolio)
+            except Exception as e:
+                logger.debug("cuOpt failed at ra=%.4f: %s", ra_value, e)
+
+        # CVXPY CLARABEL fallback
         try:
-            cvar_problem.params.update_risk_aversion(ra_value)
-            cvar_problem.risk_aversion_param.value = ra_value
-
-            result_row, portfolio = cvar_problem.solve_optimization_problem(
-                solver_settings=solver_settings,
-                print_results=False,
+            prob = cvar_optimizer.CVaR(
+                returns_dict=returns_dict,
+                cvar_params=cvar_params,
+                api_settings=_cvxpy_api_settings(),
             )
-
-            expected_return = float(result_row["return"])
-            cvar_value = float(result_row["CVaR"])
-            variance = portfolio.calculate_portfolio_variance(covariance)
-            volatility = np.sqrt(variance)
-
-            weights_dict = {
-                t: round(float(w), 6)
-                for t, w in zip(tickers, portfolio.weights)
+            prob.risk_aversion_param.value = ra_value
+            fallback = {
+                "solver": cp.CLARABEL, "verbose": False,
+                "tol_gap_abs": 1e-4, "tol_gap_rel": 1e-4, "tol_feas": 1e-4,
             }
-
-            points.append(FrontierPoint(
-                lambda_val=round(float(ra_value), 6),
-                expected_return=round(expected_return * 252 * 100, 2),
-                cvar=round(cvar_value * 100, 4),
-                volatility=round(float(volatility) * np.sqrt(252) * 100, 2),
-                weights=weights_dict,
-            ))
-
+            result_row, portfolio = prob.solve_optimization_problem(
+                solver_settings=fallback, print_results=False,
+            )
+            return _make_point(ra_value, result_row, portfolio)
         except Exception as e:
-            logger.debug("Frontier point failed at ra=%.4f: %s", ra_value, e)
-            # Try fallback solver for this point
-            if solver_settings.get("solver") == cp.CUOPT:
-                try:
-                    fallback = {
-                        "solver": cp.CLARABEL, "verbose": False,
-                        "tol_gap_abs": 1e-4, "tol_gap_rel": 1e-4, "tol_feas": 1e-4,
-                    }
-                    result_row, portfolio = cvar_problem.solve_optimization_problem(
-                        solver_settings=fallback, print_results=False,
-                    )
-                    expected_return = float(result_row["return"])
-                    cvar_value = float(result_row["CVaR"])
-                    variance = portfolio.calculate_portfolio_variance(covariance)
-                    volatility = np.sqrt(variance)
-                    weights_dict = {
-                        t: round(float(w), 6)
-                        for t, w in zip(tickers, portfolio.weights)
-                    }
-                    points.append(FrontierPoint(
-                        lambda_val=round(float(ra_value), 6),
-                        expected_return=round(expected_return * 252 * 100, 2),
-                        cvar=round(cvar_value * 100, 4),
-                        volatility=round(float(volatility) * np.sqrt(252) * 100, 2),
-                        weights=weights_dict,
-                    ))
-                except Exception:
-                    continue
-            else:
-                continue
+            logger.debug("CLARABEL failed at ra=%.4f: %s", ra_value, e)
+            return None
+
+    def _make_point(ra_value, result_row, portfolio):
+        expected_return = float(result_row["return"])
+        cvar_value = float(result_row["CVaR"])
+        variance = portfolio.calculate_portfolio_variance(covariance)
+        volatility = np.sqrt(variance)
+        weights_dict = {
+            t: round(float(w), 6)
+            for t, w in zip(tickers, portfolio.weights)
+        }
+        return FrontierPoint(
+            lambda_val=round(float(ra_value), 6),
+            expected_return=round(expected_return * 252 * 100, 2),
+            cvar=round(cvar_value * 100, 4),
+            volatility=round(float(volatility) * np.sqrt(252) * 100, 2),
+            weights=weights_dict,
+        )
+
+    for ra_value in risk_aversion_list:
+        pt = _solve_one_point(ra_value)
+        if pt is not None:
+            points.append(pt)
 
     return points
 

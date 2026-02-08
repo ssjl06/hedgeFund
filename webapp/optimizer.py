@@ -2,10 +2,16 @@
 Mean-CVaR Portfolio Optimization Engine (cufolio backend)
 
 Uses NVIDIA's cufolio library from quantitative-portfolio-optimization:
-  - cvar_optimizer.CVaR  for LP/MILP optimization (CVXPY + cuOpt/CLARABEL)
+  - cvar_optimizer.CVaR  for LP/MILP optimization (cuOpt Python API + PDLP)
   - cvar_utils           for scenario generation (KDE/Gaussian/Historical)
   - backtest             for portfolio backtesting
   - Portfolio, CvarParameters, CvarData  data structures
+
+Solver strategy:
+  1. cuOpt Python API with PDLP method (GPU) — avoids dual simplex crash on
+     small GPUs like MX450 by forcing method=PDLP.
+  2. SCIP (CPU) fallback for MILP if cuOpt fails.
+  3. CLARABEL (CPU) fallback for LP if cuOpt fails.
 """
 
 import logging
@@ -25,24 +31,39 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Solver detection
+# Solver / API detection
 # ---------------------------------------------------------------------------
-def _detect_solver_settings() -> dict:
-    """Detect best available CVXPY solver.  Prefer cuOpt GPU, fallback CLARABEL."""
-    solvers = cp.installed_solvers()
-    if "CUOPT" in solvers:
-        return {
-            "solver": cp.CUOPT,
-            "verbose": False,
-            "solver_method": "PDLP",
-            "time_limit": 30,
-        }
+def _has_cuopt() -> bool:
+    """Check if cuOpt GPU solver is available."""
+    return "CUOPT" in cp.installed_solvers()
+
+
+def _cuopt_api_settings() -> dict:
+    """Return cufolio api_settings for cuOpt Python API (bypasses CVXPY)."""
     return {
-        "solver": cp.CLARABEL,
-        "verbose": False,
-        "tol_gap_abs": 1e-4,
-        "tol_gap_rel": 1e-4,
-        "tol_feas": 1e-4,
+        "api": "cuopt_python",
+        "weight_constraints_type": "bounds",
+        "cash_constraints_type": "bounds",
+    }
+
+
+def _cuopt_solver_settings() -> dict:
+    """cuOpt solver settings: force PDLP method to avoid dual-simplex crash on
+    small GPUs (e.g. MX450) where sparse Cholesky segfaults."""
+    return {
+        "method": 1,            # SolverMethod.PDLP — skip dual simplex & barrier
+        "pdlp_solver_mode": 4,  # PDLPSolverMode.Stable3
+        "time_limit": 60,
+        "log_to_console": False,
+    }
+
+
+def _cvxpy_api_settings() -> dict:
+    """Return cufolio api_settings for CVXPY path (CPU solvers)."""
+    return {
+        "api": "cvxpy",
+        "weight_constraints_type": "bounds",
+        "cash_constraints_type": "bounds",
     }
 
 
@@ -342,18 +363,33 @@ def _solve_cvar(returns_dict: dict, cvar_params: CvarParameters,
     Returns (result_row, portfolio, cvar_problem) from cufolio.
 
     Solver priority:
-      1. cuOpt GPU  (LP and MILP)
-      2. SCIP CPU   (MILP fallback — cuOpt may OOM on small GPUs)
-      3. CLARABEL CPU (LP only fallback)
+      1. cuOpt Python API + PDLP (GPU) — uses cuOpt directly, avoids the
+         CVXPY dual-simplex path that segfaults on small GPUs.
+      2. SCIP via CVXPY (CPU) — MILP fallback if cuOpt OOM.
+      3. CLARABEL via CVXPY (CPU) — LP fallback.
     """
     is_milp = cvar_params.cardinality is not None
-    solver_settings = _detect_solver_settings()
 
-    # For MILP on small GPUs, cuOpt may fail with CUDA OOM.
-    # Build a fallback chain: cuOpt -> SCIP (MIP) -> CLARABEL (LP only)
+    # --- Attempt 1: cuOpt Python API with PDLP ---
+    if _has_cuopt():
+        try:
+            cvar_problem = cvar_optimizer.CVaR(
+                returns_dict=returns_dict,
+                cvar_params=cvar_params,
+                api_settings=_cuopt_api_settings(),
+                existing_portfolio=existing_portfolio,
+            )
+            result_row, portfolio = cvar_problem.solve_optimization_problem(
+                solver_settings=_cuopt_solver_settings(),
+                print_results=False,
+            )
+            logger.info("Solved with cuOpt Python API (PDLP)")
+            return result_row, portfolio, cvar_problem
+        except Exception as e:
+            logger.warning("cuOpt Python API failed: %s", e)
+
+    # --- Attempt 2+: CVXPY fallbacks (SCIP for MILP, CLARABEL for LP) ---
     fallback_chain = []
-    if solver_settings.get("solver") == cp.CUOPT:
-        fallback_chain.append(solver_settings)
     if is_milp and "SCIP" in cp.installed_solvers():
         fallback_chain.append({"solver": cp.SCIP, "verbose": False})
     fallback_chain.append({
@@ -367,16 +403,19 @@ def _solve_cvar(returns_dict: dict, cvar_params: CvarParameters,
             cvar_problem = cvar_optimizer.CVaR(
                 returns_dict=returns_dict,
                 cvar_params=cvar_params,
+                api_settings=_cvxpy_api_settings(),
                 existing_portfolio=existing_portfolio,
             )
             result_row, portfolio = cvar_problem.solve_optimization_problem(
                 solver_settings=settings,
                 print_results=False,
             )
+            solver_name = str(settings.get("solver", "unknown"))
+            logger.info("Solved with CVXPY fallback (%s)", solver_name)
             return result_row, portfolio, cvar_problem
         except Exception as e:
             solver_name = str(settings.get("solver", "unknown"))
-            logger.warning("Solver %s failed: %s", solver_name, e)
+            logger.warning("CVXPY solver %s failed: %s", solver_name, e)
             last_error = e
             continue
 
