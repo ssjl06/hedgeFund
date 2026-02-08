@@ -339,47 +339,48 @@ def _solve_cvar(returns_dict: dict, cvar_params: CvarParameters,
                 existing_portfolio: Portfolio | None = None):
     """
     Build and solve CVaR problem using cufolio.
-    Returns (result_row, portfolio) from cufolio.
-    Tries cuOpt GPU first, falls back to CLARABEL CPU.
+    Returns (result_row, portfolio, cvar_problem) from cufolio.
+
+    Solver priority:
+      1. cuOpt GPU  (LP and MILP)
+      2. SCIP CPU   (MILP fallback — cuOpt may OOM on small GPUs)
+      3. CLARABEL CPU (LP only fallback)
     """
+    is_milp = cvar_params.cardinality is not None
     solver_settings = _detect_solver_settings()
 
-    cvar_problem = cvar_optimizer.CVaR(
-        returns_dict=returns_dict,
-        cvar_params=cvar_params,
-        existing_portfolio=existing_portfolio,
-    )
+    # For MILP on small GPUs, cuOpt may fail with CUDA OOM.
+    # Build a fallback chain: cuOpt -> SCIP (MIP) -> CLARABEL (LP only)
+    fallback_chain = []
+    if solver_settings.get("solver") == cp.CUOPT:
+        fallback_chain.append(solver_settings)
+    if is_milp and "SCIP" in cp.installed_solvers():
+        fallback_chain.append({"solver": cp.SCIP, "verbose": False})
+    fallback_chain.append({
+        "solver": cp.CLARABEL, "verbose": False,
+        "tol_gap_abs": 1e-4, "tol_gap_rel": 1e-4, "tol_feas": 1e-4,
+    })
 
-    try:
-        result_row, portfolio = cvar_problem.solve_optimization_problem(
-            solver_settings=solver_settings,
-            print_results=False,
-        )
-    except Exception as e:
-        # If cuOpt fails, try CLARABEL
-        if solver_settings.get("solver") == cp.CUOPT:
-            logger.warning("cuOpt solver failed (%s), falling back to CLARABEL", e)
-            fallback = {
-                "solver": cp.CLARABEL,
-                "verbose": False,
-                "tol_gap_abs": 1e-4,
-                "tol_gap_rel": 1e-4,
-                "tol_feas": 1e-4,
-            }
-            # Rebuild problem for CLARABEL
+    last_error = None
+    for settings in fallback_chain:
+        try:
             cvar_problem = cvar_optimizer.CVaR(
                 returns_dict=returns_dict,
                 cvar_params=cvar_params,
                 existing_portfolio=existing_portfolio,
             )
             result_row, portfolio = cvar_problem.solve_optimization_problem(
-                solver_settings=fallback,
+                solver_settings=settings,
                 print_results=False,
             )
-        else:
-            raise
+            return result_row, portfolio, cvar_problem
+        except Exception as e:
+            solver_name = str(settings.get("solver", "unknown"))
+            logger.warning("Solver %s failed: %s", solver_name, e)
+            last_error = e
+            continue
 
-    return result_row, portfolio, cvar_problem
+    raise RuntimeError(f"All solvers failed. Last error: {last_error}")
 
 
 # ---------------------------------------------------------------------------
