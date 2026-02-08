@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>CVaR Portfolio Optimizer</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous" />
-  <!-- Plotly CDN does not provide official SRI hashes, so SRI is omitted -->
   <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
   <style>
     :root { --accent: #0d6efd; }
@@ -23,7 +22,7 @@
       font-size: 1rem; line-height: 1; padding: 0 2px;
     }
     .ticker-badge button:hover { color: #c00; }
-    #ticker-container { min-height: 40px; display: flex; flex-wrap: wrap; gap: 4px; }
+    .ticker-container { min-height: 40px; display: flex; flex-wrap: wrap; gap: 4px; }
     .summary-card { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                     color: #fff; border-radius: 12px; padding: 20px; }
     .summary-card h6 { opacity: .8; font-size: .75rem; text-transform: uppercase; margin-bottom: 2px; }
@@ -35,6 +34,12 @@
     }
     .weight-table th { font-size: .8rem; color: #666; }
     .preset-btn { font-size: .78rem; }
+    .param-help { font-size: .75rem; color: #888; margin-top: 2px; }
+    .nav-tabs .nav-link { font-weight: 600; }
+    .accordion-button { font-size: .9rem; font-weight: 600; }
+    .per-asset-row { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; }
+    .per-asset-row input { width: 80px; }
+    .per-asset-row span { font-weight: 600; font-size: .85rem; min-width: 80px; }
   </style>
 </head>
 <body>
@@ -53,14 +58,30 @@
     <span class="brand">CVaR Portfolio Optimizer</span>
     <div>
       <button class="btn btn-outline-secondary btn-sm me-2" data-bs-toggle="modal" data-bs-target="#helpModal">사용법</button>
-      <span class="text-muted small d-none d-md-inline">Mean-CVaR · Rockafellar-Uryasev (2000)</span>
+      <span class="text-muted small d-none d-md-inline">Mean-CVaR &middot; Rockafellar-Uryasev (2000)</span>
     </div>
   </div>
 </nav>
 
 <div class="container pb-5">
+
+<!-- Tabs -->
+<ul class="nav nav-tabs mb-4" id="mainTabs" role="tablist">
+  <li class="nav-item" role="presentation">
+    <button class="nav-link active" id="tab-opt" data-bs-toggle="tab" data-bs-target="#pane-opt" type="button" role="tab">CVaR 포트폴리오 최적화</button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" id="tab-frontier" data-bs-toggle="tab" data-bs-target="#pane-frontier" type="button" role="tab">효율적 프론티어</button>
+  </li>
+</ul>
+
+<div class="tab-content">
+<!-- ================================================================== -->
+<!-- TAB 1: CVaR Portfolio Optimization                                 -->
+<!-- ================================================================== -->
+<div class="tab-pane fade show active" id="pane-opt" role="tabpanel">
 <div class="row g-4">
-  <!-- ===== LEFT: Input Panel ===== -->
+  <!-- LEFT: Input Panel -->
   <div class="col-lg-4">
     <div class="card p-4">
       <h5 class="mb-3">매개변수 설정</h5>
@@ -68,112 +89,379 @@
       <!-- Presets -->
       <div class="mb-3">
         <label class="form-label">빠른 프리셋</label>
-        <div id="preset-buttons" class="d-flex flex-wrap gap-1"></div>
+        <div id="preset-buttons-opt" class="d-flex flex-wrap gap-1"></div>
       </div>
 
       <!-- Ticker input -->
       <div class="mb-3">
         <label class="form-label">종목 코드 (최소 2개)</label>
         <div class="input-group input-group-sm">
-          <input type="text" id="ticker-input" class="form-control" placeholder="예: AAPL, 005930.KS" />
-          <button class="btn btn-outline-primary" onclick="addTicker()">추가</button>
+          <input type="text" id="ticker-input-opt" class="form-control" placeholder="예: AAPL, 005930.KS" />
+          <button class="btn btn-outline-primary" onclick="addTicker('opt')">추가</button>
         </div>
-        <div id="ticker-container" class="mt-2"></div>
+        <div id="ticker-container-opt" class="ticker-container mt-2"></div>
       </div>
 
-      <!-- Date range -->
-      <div class="row mb-3">
-        <div class="col-6">
-          <label class="form-label">시작일</label>
-          <input type="date" id="start-date" class="form-control form-control-sm" value="{{ default_start }}" />
-        </div>
-        <div class="col-6">
-          <label class="form-label">종료일</label>
-          <input type="date" id="end-date" class="form-control form-control-sm" value="{{ today }}" />
-        </div>
-      </div>
+      <!-- Accordion sections -->
+      <div class="accordion" id="optAccordion">
 
-      <!-- Confidence level -->
-      <div class="mb-3">
-        <label class="form-label">CVaR 신뢰수준 (β): <span id="beta-val">0.95</span>
-          <br /><small class="text-muted">높을수록 극단적 손실에 초점 (보통 0.95)</small>
-        </label>
-        <input type="range" class="form-range" id="confidence" min="0.90" max="0.99" step="0.01" value="0.95"
-               oninput="document.getElementById('beta-val').textContent=this.value" />
-      </div>
-
-      <!-- Risk aversion -->
-      <div class="mb-3">
-        <label class="form-label">위험 회피도 (λ): <span id="lambda-val">0.50</span>
-          <br /><small class="text-muted">0에 가까울수록 안전 추구 · 1에 가까울수록 수익 추구</small>
-        </label>
-        <input type="range" class="form-range" id="risk-aversion" min="0.0" max="1.0" step="0.05" value="0.50"
-               oninput="document.getElementById('lambda-val').textContent=parseFloat(this.value).toFixed(2)" />
-      </div>
-
-      <!-- Weight bounds -->
-      <div class="row mb-3">
-        <div class="col-6">
-          <label class="form-label">최소 비중</label>
-          <input type="number" id="min-weight" class="form-control form-control-sm" value="0.00" min="0" max="1" step="0.01" />
+        <!-- Section: Basic -->
+        <div class="accordion-item">
+          <h2 class="accordion-header"><button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#acc-basic">기본 설정</button></h2>
+          <div id="acc-basic" class="accordion-collapse collapse show" data-bs-parent="#optAccordion">
+            <div class="accordion-body">
+              <!-- Date range -->
+              <div class="row mb-3">
+                <div class="col-6">
+                  <label class="form-label">시작일</label>
+                  <input type="date" id="start-date-opt" class="form-control form-control-sm" value="{{ default_start }}" />
+                </div>
+                <div class="col-6">
+                  <label class="form-label">종료일</label>
+                  <input type="date" id="end-date-opt" class="form-control form-control-sm" value="{{ today }}" />
+                </div>
+              </div>
+              <!-- Confidence -->
+              <div class="mb-3">
+                <label class="form-label">CVaR 신뢰수준 (&beta;): <span id="beta-val-opt">0.95</span></label>
+                <input type="range" class="form-range" id="confidence-opt" min="0.90" max="0.99" step="0.01" value="0.95"
+                       oninput="document.getElementById('beta-val-opt').textContent=this.value" />
+                <div class="param-help">높을수록 극단적 손실에 초점. 0.95 = 하위 5% 최악의 날 기준</div>
+              </div>
+              <!-- Risk aversion -->
+              <div class="mb-3">
+                <label class="form-label">위험 회피도 (&lambda;): <span id="lambda-val-opt">0.50</span></label>
+                <input type="range" class="form-range" id="risk-aversion-opt" min="0.0" max="1.0" step="0.05" value="0.50"
+                       oninput="document.getElementById('lambda-val-opt').textContent=parseFloat(this.value).toFixed(2)" />
+                <div class="param-help">0 = 위험 최소화 (안전) &middot; 1 = 수익 최대화 (공격적)</div>
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="col-6">
-          <label class="form-label">최대 비중</label>
-          <input type="number" id="max-weight" class="form-control form-control-sm" value="1.00" min="0" max="1" step="0.01" />
-        </div>
-      </div>
 
-      <button class="btn btn-primary w-100 mt-2" id="run-btn" onclick="runOptimization()">
+        <!-- Section: Returns & Scenarios -->
+        <div class="accordion-item">
+          <h2 class="accordion-header"><button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#acc-scenario">수익률 &amp; 시나리오</button></h2>
+          <div id="acc-scenario" class="accordion-collapse collapse" data-bs-parent="#optAccordion">
+            <div class="accordion-body">
+              <div class="mb-3">
+                <label class="form-label">수익률 유형</label>
+                <select id="return-type-opt" class="form-select form-select-sm">
+                  <option value="simple" selected>단순 수익률 (Simple)</option>
+                  <option value="log">로그 수익률 (Log)</option>
+                </select>
+                <div class="param-help">단순: (P1-P0)/P0 &middot; 로그: ln(P1/P0), 연속 복리에 적합</div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">시나리오 생성 방법</label>
+                <select id="scenario-method-opt" class="form-select form-select-sm" onchange="toggleKdeParams()">
+                  <option value="historical" selected>과거 데이터 (Historical)</option>
+                  <option value="kde">KDE (커널 밀도 추정)</option>
+                  <option value="gaussian">가우시안 (정규분포)</option>
+                </select>
+                <div class="param-help">KDE: 비모수적 분포 추정으로 다양한 시나리오 생성</div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">시나리오 수 (0 = 자동)</label>
+                <input type="number" id="num-scenarios-opt" class="form-control form-control-sm" value="0" min="0" max="50000" />
+                <div class="param-help">0이면 과거 데이터 수와 동일. KDE/가우시안은 1000~5000 권장</div>
+              </div>
+              <div id="kde-params-opt" class="d-none">
+                <div class="mb-3">
+                  <label class="form-label">KDE 대역폭 (bandwidth)</label>
+                  <input type="number" id="kde-bandwidth-opt" class="form-control form-control-sm" value="0.5" min="0.01" max="10" step="0.1" />
+                  <div class="param-help">작을수록 과적합, 클수록 과도한 평활화. 0.3~1.0 권장</div>
+                </div>
+                <div class="mb-3">
+                  <label class="form-label">KDE 커널</label>
+                  <select id="kde-kernel-opt" class="form-select form-select-sm">
+                    <option value="gaussian" selected>Gaussian</option>
+                    <option value="tophat">Tophat</option>
+                    <option value="epanechnikov">Epanechnikov</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Section: Weight Constraints -->
+        <div class="accordion-item">
+          <h2 class="accordion-header"><button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#acc-weights">비중 제약</button></h2>
+          <div id="acc-weights" class="accordion-collapse collapse" data-bs-parent="#optAccordion">
+            <div class="accordion-body">
+              <div class="row mb-3">
+                <div class="col-6">
+                  <label class="form-label">전체 최소 비중</label>
+                  <input type="number" id="min-weight-opt" class="form-control form-control-sm" value="0.00" min="-1" max="1" step="0.01" />
+                </div>
+                <div class="col-6">
+                  <label class="form-label">전체 최대 비중</label>
+                  <input type="number" id="max-weight-opt" class="form-control form-control-sm" value="1.00" min="-1" max="1" step="0.01" />
+                </div>
+              </div>
+              <div class="param-help mb-2">개별 종목별 비중 제한 (선택 사항):</div>
+              <div id="per-asset-bounds-opt"></div>
+              <button class="btn btn-outline-secondary btn-sm mt-2" onclick="refreshPerAssetBounds()">종목별 제한 갱신</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Section: Advanced Constraints -->
+        <div class="accordion-item">
+          <h2 class="accordion-header"><button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#acc-advanced">고급 제약</button></h2>
+          <div id="acc-advanced" class="accordion-collapse collapse" data-bs-parent="#optAccordion">
+            <div class="accordion-body">
+              <div class="row mb-3">
+                <div class="col-6">
+                  <label class="form-label">현금 최소 비중</label>
+                  <input type="number" id="cash-min-opt" class="form-control form-control-sm" value="0.00" min="0" max="1" step="0.01" />
+                </div>
+                <div class="col-6">
+                  <label class="form-label">현금 최대 비중</label>
+                  <input type="number" id="cash-max-opt" class="form-control form-control-sm" value="0.00" min="0" max="1" step="0.01" />
+                  <div class="param-help">0이면 현금 배분 없음. 0.1 = 최대 10% 현금</div>
+                </div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">레버리지 목표</label>
+                <input type="number" id="leverage-opt" class="form-control form-control-sm" value="1.0" min="0.5" max="3.0" step="0.1" />
+                <div class="param-help">1.0 = 일반. 1.5 = 150% 투자 (50% 차입). 비중 + 현금 = 목표값</div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">CVaR 한도 (%, 선택)</label>
+                <input type="number" id="cvar-limit-opt" class="form-control form-control-sm" value="" placeholder="예: 2.5" min="0" step="0.1" />
+                <div class="param-help">일별 CVaR이 이 값을 초과하지 않도록 제한</div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">최대 종목 수 (카디널리티, 선택)</label>
+                <input type="number" id="max-assets-opt" class="form-control form-control-sm" value="" placeholder="예: 5" min="1" max="30" />
+                <div class="param-help">정수계획법(MILP)으로 종목 수 제한. 비워두면 제한 없음</div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">턴오버 목표 (선택)</label>
+                <input type="number" id="turnover-opt" class="form-control form-control-sm" value="" placeholder="예: 0.3" min="0" max="2" step="0.05" />
+                <div class="param-help">현재 비중 대비 변경 허용량. 0.3 = 30%까지 리밸런싱 허용</div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">현재 비중 (턴오버 제약 시, 쉼표 구분)</label>
+                <input type="text" id="current-weights-opt" class="form-control form-control-sm" placeholder="예: 0.2, 0.3, 0.5" />
+                <div class="param-help">종목 순서대로 현재 보유 비중 입력</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Section: Backtest -->
+        <div class="accordion-item">
+          <h2 class="accordion-header"><button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#acc-backtest">백테스트</button></h2>
+          <div id="acc-backtest" class="accordion-collapse collapse" data-bs-parent="#optAccordion">
+            <div class="accordion-body">
+              <div class="mb-3">
+                <label class="form-label">Train/Test 분할일 (선택)</label>
+                <input type="date" id="split-date-opt" class="form-control form-control-sm" value="" />
+                <div class="param-help">분할일 기준으로 훈련/테스트 성과를 별도 평가</div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">비교 포트폴리오 (JSON, 선택)</label>
+                <textarea id="benchmarks-opt" class="form-control form-control-sm" rows="3" placeholder='{"보수적": [0.1, 0.2, 0.3, 0.4], "공격적": [0.4, 0.3, 0.2, 0.1]}'></textarea>
+                <div class="param-help">이름:비중배열 형태로 입력. 종목 수와 비중 수가 일치해야 함</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div><!-- /accordion -->
+
+      <button class="btn btn-primary w-100 mt-3" id="run-btn-opt" onclick="runAdvancedOptimization()">
         최적화 실행
       </button>
     </div>
   </div>
 
-  <!-- ===== RIGHT: Results ===== -->
+  <!-- RIGHT: Results -->
   <div class="col-lg-8">
     <!-- Summary cards -->
-    <div id="summary-section" class="d-none mb-4">
-      <div class="row g-3" id="summary-cards"></div>
+    <div id="summary-section-opt" class="d-none mb-4">
+      <div class="row g-3" id="summary-cards-opt"></div>
     </div>
 
     <!-- Weight table -->
-    <div id="weight-section" class="d-none mb-4">
+    <div id="weight-section-opt" class="d-none mb-4">
       <div class="card p-3">
         <h6 class="mb-2">최적 포트폴리오 비중</h6>
         <div class="table-responsive">
           <table class="table table-sm weight-table mb-0">
             <thead><tr><th>종목</th><th>비중 (%)</th><th>비율</th></tr></thead>
-            <tbody id="weight-tbody"></tbody>
+            <tbody id="weight-tbody-opt"></tbody>
           </table>
         </div>
       </div>
     </div>
 
-    <!-- Charts -->
-    <div id="charts-section" class="d-none">
-      <div class="card p-3 mb-4"><div id="chart-cumulative" class="chart-container"></div></div>
-      <div class="card p-3 mb-4"><div id="chart-frontier" class="chart-container"></div></div>
-      <div class="row g-4 mb-4">
-        <div class="col-md-6"><div class="card p-3"><div id="chart-weights" class="chart-container"></div></div></div>
-        <div class="col-md-6"><div class="card p-3"><div id="chart-distribution" class="chart-container"></div></div></div>
+    <!-- Train/Test metrics -->
+    <div id="traintest-section-opt" class="d-none mb-4">
+      <div class="card p-3">
+        <h6 class="mb-2">Train/Test 분할 성과</h6>
+        <div class="row g-3" id="traintest-cards-opt"></div>
       </div>
+    </div>
+
+    <!-- Charts -->
+    <div id="charts-section-opt" class="d-none">
+      <div class="card p-3 mb-4"><div id="chart-backtest-split" class="chart-container"></div></div>
+      <div class="card p-3 mb-4"><div id="chart-portfolio-summary" class="chart-container"></div></div>
       <div class="row g-4 mb-4">
-        <div class="col-md-6"><div class="card p-3"><div id="chart-correlation" class="chart-container"></div></div></div>
-        <div class="col-md-6"><div class="card p-3"><div id="chart-drawdown" class="chart-container"></div></div></div>
+        <div class="col-md-6"><div class="card p-3"><div id="chart-scenario-dist" class="chart-container"></div></div></div>
+        <div class="col-md-6"><div class="card p-3"><div id="chart-benchmark-bar" class="chart-container"></div></div></div>
       </div>
     </div>
 
     <!-- Placeholder -->
-    <div id="placeholder" class="text-center py-5 text-muted">
+    <div id="placeholder-opt" class="text-center py-5 text-muted">
       <h4>왼쪽에서 매개변수를 설정하고 <strong>최적화 실행</strong>을 눌러주세요</h4>
-      <p class="mt-3 mb-0">과거 주가 데이터를 기반으로 Mean-CVaR 선형계획법을 풀어<br/>
-         최적의 포트폴리오 비중을 산출하고, 백테스트 결과를 차트로 보여드립니다.</p>
+      <p class="mt-3 mb-0">KDE/가우시안 시나리오 생성, 현금 배분, 레버리지, 턴오버, 카디널리티 제약 등<br/>
+         고급 CVaR 최적화를 수행하고 상세 백테스트 결과를 보여드립니다.</p>
     </div>
   </div>
 </div>
 </div>
 
-<!-- Help / About Modal -->
+<!-- ================================================================== -->
+<!-- TAB 2: Efficient Frontier                                          -->
+<!-- ================================================================== -->
+<div class="tab-pane fade" id="pane-frontier" role="tabpanel">
+<div class="row g-4">
+  <!-- LEFT: Input Panel -->
+  <div class="col-lg-4">
+    <div class="card p-4">
+      <h5 class="mb-3">프론티어 설정</h5>
+
+      <!-- Presets -->
+      <div class="mb-3">
+        <label class="form-label">빠른 프리셋</label>
+        <div id="preset-buttons-fr" class="d-flex flex-wrap gap-1"></div>
+      </div>
+
+      <!-- Ticker input -->
+      <div class="mb-3">
+        <label class="form-label">종목 코드 (최소 2개)</label>
+        <div class="input-group input-group-sm">
+          <input type="text" id="ticker-input-fr" class="form-control" placeholder="예: AAPL, MSFT" />
+          <button class="btn btn-outline-primary" onclick="addTicker('fr')">추가</button>
+        </div>
+        <div id="ticker-container-fr" class="ticker-container mt-2"></div>
+      </div>
+
+      <!-- Basic settings -->
+      <div class="row mb-3">
+        <div class="col-6">
+          <label class="form-label">시작일</label>
+          <input type="date" id="start-date-fr" class="form-control form-control-sm" value="{{ default_start }}" />
+        </div>
+        <div class="col-6">
+          <label class="form-label">종료일</label>
+          <input type="date" id="end-date-fr" class="form-control form-control-sm" value="{{ today }}" />
+        </div>
+      </div>
+
+      <div class="mb-3">
+        <label class="form-label">CVaR 신뢰수준 (&beta;): <span id="beta-val-fr">0.95</span></label>
+        <input type="range" class="form-range" id="confidence-fr" min="0.90" max="0.99" step="0.01" value="0.95"
+               oninput="document.getElementById('beta-val-fr').textContent=this.value" />
+      </div>
+
+      <div class="row mb-3">
+        <div class="col-6">
+          <label class="form-label">최소 비중</label>
+          <input type="number" id="min-weight-fr" class="form-control form-control-sm" value="0.00" min="-1" max="1" step="0.01" />
+        </div>
+        <div class="col-6">
+          <label class="form-label">최대 비중</label>
+          <input type="number" id="max-weight-fr" class="form-control form-control-sm" value="1.00" min="-1" max="1" step="0.01" />
+        </div>
+      </div>
+
+      <!-- Frontier settings -->
+      <hr />
+      <h6 class="fw-bold mb-3">프론티어 스윕 설정</h6>
+      <div class="row mb-3">
+        <div class="col-4">
+          <label class="form-label">최소 지수</label>
+          <input type="number" id="min-exp-fr" class="form-control form-control-sm" value="-3" min="-5" max="0" step="0.5" />
+          <div class="param-help">10^(-3)=0.001</div>
+        </div>
+        <div class="col-4">
+          <label class="form-label">최대 지수</label>
+          <input type="number" id="max-exp-fr" class="form-control form-control-sm" value="1" min="0" max="3" step="0.5" />
+          <div class="param-help">10^1=10</div>
+        </div>
+        <div class="col-4">
+          <label class="form-label">단계 수</label>
+          <input type="number" id="n-steps-fr" class="form-control form-control-sm" value="50" min="5" max="200" />
+        </div>
+      </div>
+      <div class="param-help mb-3">&lambda;를 로그 스케일(10^min ~ 10^max)로 스윕하여 프론티어를 계산합니다.</div>
+
+      <!-- Custom portfolio -->
+      <hr />
+      <h6 class="fw-bold mb-3">비교 포트폴리오 (선택)</h6>
+      <div id="custom-portfolio-fr"></div>
+      <button class="btn btn-outline-secondary btn-sm mt-2" onclick="refreshCustomPortfolio()">비중 입력란 갱신</button>
+      <div class="param-help mt-1">프론티어 차트 위에 내 포트폴리오 위치를 표시합니다.</div>
+
+      <button class="btn btn-primary w-100 mt-3" id="run-btn-fr" onclick="runFrontierAnalysis()">
+        프론티어 분석 실행
+      </button>
+    </div>
+  </div>
+
+  <!-- RIGHT: Results -->
+  <div class="col-lg-8">
+    <!-- Summary -->
+    <div id="summary-section-fr" class="d-none mb-4">
+      <div class="row g-3" id="summary-cards-fr"></div>
+    </div>
+
+    <!-- Charts -->
+    <div id="charts-section-fr" class="d-none">
+      <div class="card p-3 mb-4"><div id="chart-frontier-overlay" class="chart-container"></div></div>
+      <div class="card p-3 mb-4"><div id="chart-weights-heatmap" class="chart-container"></div></div>
+      <div class="card p-3 mb-4"><div id="chart-lambda-profile" class="chart-container"></div></div>
+
+      <!-- Export -->
+      <div class="text-center mb-4">
+        <button class="btn btn-outline-success" id="export-csv-btn" onclick="exportFrontierCSV()">CSV 다운로드</button>
+      </div>
+    </div>
+
+    <!-- Tangent portfolio table -->
+    <div id="tangent-section-fr" class="d-none mb-4">
+      <div class="card p-3">
+        <h6 class="mb-2">접선 포트폴리오 (최대 샤프 비율)</h6>
+        <div class="table-responsive">
+          <table class="table table-sm weight-table mb-0">
+            <thead><tr><th>종목</th><th>비중 (%)</th><th>비율</th></tr></thead>
+            <tbody id="tangent-tbody-fr"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Placeholder -->
+    <div id="placeholder-fr" class="text-center py-5 text-muted">
+      <h4>왼쪽에서 종목과 설정을 입력하고 <strong>프론티어 분석 실행</strong>을 눌러주세요</h4>
+      <p class="mt-3 mb-0">로그 스케일 &lambda; 스윕으로 효율적 프론티어를 계산하고,<br/>
+         내 포트폴리오 위치와 비중 변화를 시각화합니다.</p>
+    </div>
+  </div>
+</div>
+</div>
+
+</div><!-- /tab-content -->
+</div><!-- /container -->
+
+<!-- Help Modal -->
 <div class="modal fade" id="helpModal" tabindex="-1">
   <div class="modal-dialog modal-lg modal-dialog-scrollable">
     <div class="modal-content">
@@ -188,96 +476,48 @@
           CVaR은 <strong>"최악의 상황에서 평균적으로 얼마나 잃을 수 있는가"</strong>를 측정하는 위험 지표입니다.
           예를 들어 <em>95% CVaR이 -3%</em>라면, 가장 나쁜 5%의 날에 평균 3%의 손실이 예상된다는 뜻입니다.
         </p>
-        <p>
-          전통적인 표준편차(변동성) 기반의 평균-분산 모델(Markowitz, 1952)과 달리,
-          CVaR은 <strong>꼬리 위험(tail risk)</strong>을 직접 측정하여 극단적 시장 상황에서의
-          손실을 더 정확히 반영합니다.
-        </p>
         <div class="alert alert-light border small">
           <strong>이론적 배경:</strong> Rockafellar &amp; Uryasev (2000),
-          "Optimization of Conditional Value-at-Risk", <em>Journal of Risk</em>, 2, 21-42.<br/>
-          CVaR 최적화는 선형계획법(LP)으로 변환할 수 있어 대규모 포트폴리오에도 효율적으로 풀 수 있습니다.
+          "Optimization of Conditional Value-at-Risk", <em>Journal of Risk</em>, 2, 21-42.
         </div>
 
         <hr/>
-        <h6 class="fw-bold">사용 방법</h6>
-        <ol>
-          <li>
-            <strong>종목 선택</strong> &mdash;
-            Yahoo Finance 티커 코드를 입력합니다.
-            <ul class="small text-muted mb-1">
-              <li>미국 주식: <code>AAPL</code>, <code>MSFT</code>, <code>NVDA</code></li>
-              <li>한국 주식: <code>005930.KS</code> (삼성전자), <code>000660.KS</code> (SK하이닉스)</li>
-              <li>ETF: <code>SPY</code>, <code>QQQ</code>, <code>GLD</code></li>
-            </ul>
-            또는 <em>빠른 프리셋</em> 버튼으로 미리 구성된 포트폴리오를 선택할 수 있습니다.
-          </li>
-          <li>
-            <strong>기간 설정</strong> &mdash;
-            분석에 사용할 과거 주가 데이터의 시작/종료 날짜를 지정합니다.
-            기간이 길수록 더 많은 시나리오로 분석하지만, 오래된 데이터는 현재 시장을 반영하지 못할 수 있습니다.
-          </li>
-          <li>
-            <strong>CVaR 신뢰수준 (β)</strong> &mdash;
-            꼬리 위험을 측정할 범위를 설정합니다.
-            <ul class="small text-muted mb-1">
-              <li><code>0.95</code> = 하위 5% 최악의 날 기준 (일반적 설정)</li>
-              <li><code>0.99</code> = 하위 1% 극단적 상황 기준 (매우 보수적)</li>
-            </ul>
-          </li>
-          <li>
-            <strong>위험 회피도 (λ)</strong> &mdash;
-            수익과 위험 사이의 균형을 결정합니다.
-            <ul class="small text-muted mb-1">
-              <li><code>0.0</code> = 위험 최소화 (보수적 투자자)</li>
-              <li><code>0.5</code> = 균형 잡힌 접근 (기본값)</li>
-              <li><code>1.0</code> = 수익 최대화 (공격적 투자자)</li>
-            </ul>
-          </li>
-          <li>
-            <strong>비중 제한</strong> &mdash;
-            개별 종목의 최소/최대 비중을 제한합니다.
-            예: 최대 0.30으로 설정하면 한 종목에 30% 이상 집중되지 않습니다.
-          </li>
-          <li>
-            <strong>최적화 실행</strong> 버튼을 누르면 최신 데이터를 다운로드하고
-            최적 비중을 계산합니다.
-          </li>
-        </ol>
+        <h6 class="fw-bold">기능 1: CVaR 포트폴리오 최적화</h6>
+        <ul>
+          <li><strong>시나리오 생성</strong> &mdash; 과거 데이터, KDE(커널 밀도 추정), 가우시안 분포 중 선택</li>
+          <li><strong>비중 제약</strong> &mdash; 종목별 최소/최대, 현금 배분, 레버리지 목표</li>
+          <li><strong>고급 제약</strong> &mdash; CVaR 한도, 카디널리티(최대 종목 수), 턴오버 제한</li>
+          <li><strong>백테스트</strong> &mdash; Sharpe, Sortino, MaxDD, Train/Test 분할 평가</li>
+        </ul>
 
         <hr/>
-        <h6 class="fw-bold">결과 차트 설명</h6>
-        <table class="table table-sm small">
-          <tr><td class="fw-semibold" style="width:35%">포트폴리오 비중</td>
-              <td>각 종목에 투자 자금을 어떤 비율로 배분해야 하는지 보여줍니다.</td></tr>
-          <tr><td class="fw-semibold">누적 수익률</td>
-              <td>최적화된 포트폴리오 vs 동일 비중 포트폴리오 vs 개별 종목의 성과를 비교합니다.</td></tr>
-          <tr><td class="fw-semibold">효율적 프론티어</td>
-              <td>위험(CVaR)과 수익의 최적 조합 곡선입니다. 곡선 위의 점이 현재 선택된 포트폴리오입니다.</td></tr>
-          <tr><td class="fw-semibold">수익률 분포</td>
-              <td>일별 수익률의 분포와 함께 VaR/CVaR 위치를 표시합니다.</td></tr>
-          <tr><td class="fw-semibold">상관관계 행렬</td>
-              <td>종목 간 수익률 상관관계를 보여줍니다. 상관관계가 낮을수록 분산 효과가 큽니다.</td></tr>
-          <tr><td class="fw-semibold">드로우다운</td>
-              <td>최고점 대비 하락폭을 보여줍니다. 최대 드로우다운이 작을수록 안정적인 포트폴리오입니다.</td></tr>
-        </table>
+        <h6 class="fw-bold">기능 2: 효율적 프론티어</h6>
+        <ul>
+          <li><strong>로그 스케일 스윕</strong> &mdash; &lambda;를 로그 공간에서 스윕하여 프론티어 계산</li>
+          <li><strong>접선 포트폴리오</strong> &mdash; 최대 Sharpe 비율 포트폴리오 자동 식별</li>
+          <li><strong>비교 포트폴리오</strong> &mdash; 내 포트폴리오를 프론티어 위에 표시</li>
+          <li><strong>CSV 내보내기</strong> &mdash; 프론티어 데이터를 CSV로 다운로드</li>
+        </ul>
 
         <hr/>
         <h6 class="fw-bold">주요 지표 설명</h6>
         <table class="table table-sm small">
           <tr><td class="fw-semibold" style="width:35%">기대 연간 수익률</td>
-              <td>과거 데이터 기반으로 추정한 연간 기대 수익률입니다.</td></tr>
+              <td>과거 데이터 기반 연간 기대 수익률</td></tr>
           <tr><td class="fw-semibold">CVaR (조건부 위험)</td>
-              <td>최악의 시나리오에서 예상되는 일평균 손실률입니다.</td></tr>
+              <td>최악의 시나리오에서 예상되는 일평균 손실률</td></tr>
           <tr><td class="fw-semibold">연간 변동성</td>
-              <td>수익률의 연간 표준편차로, 가격 변동의 크기를 나타냅니다.</td></tr>
+              <td>수익률의 연간 표준편차</td></tr>
           <tr><td class="fw-semibold">샤프 비율</td>
-              <td>(수익률 - 무위험이자율) / 변동성. 1 이상이면 양호, 2 이상이면 우수합니다.</td></tr>
+              <td>(수익률 - 무위험이자율) / 변동성. 1+ 양호, 2+ 우수</td></tr>
+          <tr><td class="fw-semibold">소르티노 비율</td>
+              <td>하방 변동성만 고려한 위험 대비 수익 지표</td></tr>
+          <tr><td class="fw-semibold">최대 낙폭 (MaxDD)</td>
+              <td>최고점 대비 최대 하락률</td></tr>
         </table>
 
         <div class="alert alert-warning small mt-3">
           <strong>주의:</strong> 이 도구는 과거 데이터를 기반으로 한 분석 도구이며, 미래 수익을 보장하지 않습니다.
-          투자 결정은 본인의 판단과 책임 하에 이루어져야 합니다.
         </div>
 
       </div>
@@ -290,136 +530,403 @@
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
 <script>
-// ===== Ticker management =====
-let tickers = [];
+// ===== State =====
+const state = {
+  opt: { tickers: [] },
+  fr: { tickers: [], frontierData: null, lastParams: null },
+};
 
+// ===== Utility =====
 function escapeHtml(str) {
   const div = document.createElement('div');
-  div.textContent = str;
+  div.textContent = String(str);
   return div.innerHTML;
 }
 
-function renderTickers() {
-  const c = document.getElementById('ticker-container');
-  c.innerHTML = tickers.map((t, i) =>
-    `<span class="ticker-badge">${escapeHtml(t)}<button onclick="removeTicker(${i})">&times;</button></span>`
+// ===== Ticker management =====
+function renderTickers(tab) {
+  const c = document.getElementById('ticker-container-' + tab);
+  c.innerHTML = state[tab].tickers.map((t, i) =>
+    `<span class="ticker-badge">${escapeHtml(t)}<button onclick="removeTicker('${tab}',${i})">&times;</button></span>`
   ).join('');
 }
-function addTicker() {
-  const inp = document.getElementById('ticker-input');
-  const v = inp.value.trim().toUpperCase();
-  if (v && !tickers.includes(v)) { tickers.push(v); renderTickers(); }
+
+function addTicker(tab) {
+  const inp = document.getElementById('ticker-input-' + tab);
+  const vals = inp.value.split(',').map(v => v.trim().toUpperCase()).filter(Boolean);
+  for (const v of vals) {
+    if (v && !state[tab].tickers.includes(v)) state[tab].tickers.push(v);
+  }
+  renderTickers(tab);
   inp.value = '';
   inp.focus();
 }
-function removeTicker(i) { tickers.splice(i, 1); renderTickers(); }
 
-document.getElementById('ticker-input').addEventListener('keydown', e => {
-  if (e.key === 'Enter') { e.preventDefault(); addTicker(); }
+function removeTicker(tab, i) {
+  state[tab].tickers.splice(i, 1);
+  renderTickers(tab);
+}
+
+// Enter key for ticker inputs
+['opt', 'fr'].forEach(tab => {
+  document.getElementById('ticker-input-' + tab).addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); addTicker(tab); }
+  });
 });
 
 // ===== Presets =====
 fetch('/api/presets').then(r => r.json()).then(presets => {
-  const box = document.getElementById('preset-buttons');
-  for (const [name, syms] of Object.entries(presets)) {
-    const btn = document.createElement('button');
-    btn.className = 'btn btn-outline-secondary btn-sm preset-btn';
-    btn.textContent = name;
-    btn.onclick = () => { tickers = [...syms]; renderTickers(); };
-    box.appendChild(btn);
-  }
+  ['opt', 'fr'].forEach(tab => {
+    const box = document.getElementById('preset-buttons-' + tab);
+    for (const [name, syms] of Object.entries(presets)) {
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-outline-secondary btn-sm preset-btn';
+      btn.textContent = name;
+      btn.onclick = () => { state[tab].tickers = [...syms]; renderTickers(tab); };
+      box.appendChild(btn);
+    }
+  });
 });
 
-// ===== Run optimization =====
-async function runOptimization() {
+// ===== KDE params toggle =====
+function toggleKdeParams() {
+  const method = document.getElementById('scenario-method-opt').value;
+  document.getElementById('kde-params-opt').classList.toggle('d-none', method !== 'kde');
+}
+
+// ===== Per-asset bounds =====
+function refreshPerAssetBounds() {
+  const container = document.getElementById('per-asset-bounds-opt');
+  container.innerHTML = '';
+  for (const t of state.opt.tickers) {
+    container.innerHTML += `
+      <div class="per-asset-row">
+        <span>${escapeHtml(t)}</span>
+        <input type="number" class="form-control form-control-sm asset-min" data-ticker="${escapeHtml(t)}" value="0.00" min="-1" max="1" step="0.01" placeholder="최소" />
+        <input type="number" class="form-control form-control-sm asset-max" data-ticker="${escapeHtml(t)}" value="1.00" min="-1" max="1" step="0.01" placeholder="최대" />
+      </div>`;
+  }
+}
+
+function getPerAssetBounds() {
+  const bounds = [];
+  document.querySelectorAll('.per-asset-row').forEach(row => {
+    const minInp = row.querySelector('.asset-min');
+    const maxInp = row.querySelector('.asset-max');
+    if (minInp && maxInp) {
+      bounds.push({
+        ticker: minInp.dataset.ticker,
+        min: parseFloat(minInp.value) || 0,
+        max: parseFloat(maxInp.value) || 1,
+      });
+    }
+  });
+  return bounds;
+}
+
+// ===== Custom portfolio for frontier =====
+function refreshCustomPortfolio() {
+  const container = document.getElementById('custom-portfolio-fr');
+  container.innerHTML = '';
+  for (const t of state.fr.tickers) {
+    container.innerHTML += `
+      <div class="per-asset-row">
+        <span>${escapeHtml(t)}</span>
+        <input type="number" class="form-control form-control-sm custom-weight" data-ticker="${escapeHtml(t)}" value="" min="0" max="1" step="0.01" placeholder="비중" />
+      </div>`;
+  }
+}
+
+function getCustomPortfolio() {
+  const weights = {};
+  let hasAny = false;
+  document.querySelectorAll('#custom-portfolio-fr .custom-weight').forEach(inp => {
+    const v = parseFloat(inp.value);
+    if (!isNaN(v) && v > 0) {
+      weights[inp.dataset.ticker] = v;
+      hasAny = true;
+    }
+  });
+  return hasAny ? weights : {};
+}
+
+// ===== Show/hide spinner =====
+function showSpinner(msg) {
+  document.getElementById('spinner-text').textContent = msg || '처리 중...';
+  document.getElementById('spinner').classList.remove('d-none');
+}
+function hideSpinner() {
+  document.getElementById('spinner').classList.add('d-none');
+}
+
+// ===== Feature 1: Advanced Optimization =====
+async function runAdvancedOptimization() {
+  const tickers = state.opt.tickers;
   if (tickers.length < 2) { alert('종목을 2개 이상 추가해주세요.'); return; }
 
-  const spinner = document.getElementById('spinner');
-  spinner.classList.remove('d-none');
-  document.getElementById('run-btn').disabled = true;
+  showSpinner('데이터 다운로드 및 고급 CVaR 최적화 진행 중...');
+  document.getElementById('run-btn-opt').disabled = true;
+
+  const cvarLimitVal = document.getElementById('cvar-limit-opt').value;
+  const maxAssetsVal = document.getElementById('max-assets-opt').value;
+  const turnoverVal = document.getElementById('turnover-opt').value;
+  const currentWeightsStr = document.getElementById('current-weights-opt').value.trim();
+  const splitDate = document.getElementById('split-date-opt').value;
+  const benchmarksStr = document.getElementById('benchmarks-opt').value.trim();
+
+  let currentWeights = null;
+  if (currentWeightsStr) {
+    currentWeights = currentWeightsStr.split(',').map(v => parseFloat(v.trim()));
+  }
+
+  let benchmarkPortfolios = null;
+  if (benchmarksStr) {
+    try { benchmarkPortfolios = JSON.parse(benchmarksStr); } catch(e) { alert('벤치마크 JSON 형식이 올바르지 않습니다.'); hideSpinner(); document.getElementById('run-btn-opt').disabled = false; return; }
+  }
 
   const body = {
-    tickers: tickers,
-    start_date: document.getElementById('start-date').value,
-    end_date: document.getElementById('end-date').value,
-    confidence_level: parseFloat(document.getElementById('confidence').value),
-    risk_aversion: parseFloat(document.getElementById('risk-aversion').value),
-    min_weight: parseFloat(document.getElementById('min-weight').value),
-    max_weight: parseFloat(document.getElementById('max-weight').value),
+    tickers,
+    start_date: document.getElementById('start-date-opt').value,
+    end_date: document.getElementById('end-date-opt').value,
+    confidence_level: parseFloat(document.getElementById('confidence-opt').value),
+    risk_aversion: parseFloat(document.getElementById('risk-aversion-opt').value),
+    min_weight: parseFloat(document.getElementById('min-weight-opt').value),
+    max_weight: parseFloat(document.getElementById('max-weight-opt').value),
+    return_type: document.getElementById('return-type-opt').value,
+    scenario_method: document.getElementById('scenario-method-opt').value,
+    num_scenarios: parseInt(document.getElementById('num-scenarios-opt').value) || 0,
+    kde_bandwidth: parseFloat(document.getElementById('kde-bandwidth-opt').value) || 0.5,
+    kde_kernel: document.getElementById('kde-kernel-opt').value,
+    asset_bounds: getPerAssetBounds(),
+    cash_min: parseFloat(document.getElementById('cash-min-opt').value) || 0,
+    cash_max: parseFloat(document.getElementById('cash-max-opt').value) || 0,
+    leverage_target: parseFloat(document.getElementById('leverage-opt').value) || 1.0,
+    cvar_limit: cvarLimitVal ? parseFloat(cvarLimitVal) : null,
+    max_assets: maxAssetsVal ? parseInt(maxAssetsVal) : null,
+    turnover_target: turnoverVal ? parseFloat(turnoverVal) : null,
+    current_weights: currentWeights,
+    test_split_date: splitDate || null,
+    benchmark_portfolios: benchmarkPortfolios,
   };
 
   try {
-    const resp = await fetch('/api/optimize', {
+    const resp = await fetch('/api/optimize-advanced', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
     });
     const data = await resp.json();
     if (data.error) { alert('오류: ' + data.error); return; }
-
-    showResults(data);
+    showAdvancedResults(data);
   } catch (err) {
     alert('요청 실패: ' + err.message);
   } finally {
-    spinner.classList.add('d-none');
-    document.getElementById('run-btn').disabled = false;
+    hideSpinner();
+    document.getElementById('run-btn-opt').disabled = false;
   }
 }
 
-// ===== Display results =====
-function showResults(data) {
+function showAdvancedResults(data) {
   const s = data.summary;
 
-  // summary cards
+  // Summary cards
   const metrics = [
     { label: '기대 연간 수익률', value: s.expected_return + '%', color: '#667eea' },
     { label: 'CVaR (조건부 위험)', value: s.cvar + '%', color: '#e74c3c' },
     { label: '연간 변동성', value: s.volatility + '%', color: '#f39c12' },
     { label: '샤프 비율', value: s.sharpe_ratio, color: '#2ecc71' },
-    { label: '분석 데이터 수', value: s.data_points + '일', color: '#8e44ad' },
+    { label: '소르티노 비율', value: s.sortino_ratio, color: '#3498db' },
+    { label: '최대 낙폭', value: s.max_drawdown + '%', color: '#e67e22' },
+    { label: '시나리오 수', value: s.num_scenarios + '개', color: '#8e44ad' },
     { label: '분석 기간', value: s.date_range, color: '#34495e' },
   ];
-  document.getElementById('summary-cards').innerHTML = metrics.map(m => `
-    <div class="col-md-4 col-6">
+  document.getElementById('summary-cards-opt').innerHTML = metrics.map(m => `
+    <div class="col-md-3 col-6">
       <div class="summary-card" style="background:${m.color}">
         <h6>${m.label}</h6>
-        <div class="value">${escapeHtml(m.value)}</div>
+        <div class="value">${escapeHtml(String(m.value))}</div>
       </div>
     </div>
   `).join('');
 
-  // weight table
-  const tbody = document.getElementById('weight-tbody');
-  const sorted = Object.entries(s.weights).sort((a, b) => b[1] - a[1]);
+  // Weight table (include cash)
+  const weightEntries = Object.entries(s.weights);
+  if (s.cash_weight > 0.0001) weightEntries.push(['현금', s.cash_weight]);
+  const sorted = weightEntries.sort((a, b) => b[1] - a[1]);
+  const tbody = document.getElementById('weight-tbody-opt');
   tbody.innerHTML = sorted.map(([tk, w]) => {
     const pct = (w * 100).toFixed(2);
     return `<tr>
       <td class="fw-semibold">${escapeHtml(tk)}</td>
       <td>${escapeHtml(pct)}%</td>
       <td><div class="progress" style="height:18px">
-        <div class="progress-bar" style="width:${pct}%">${pct > 5 ? escapeHtml(pct) + '%' : ''}</div>
+        <div class="progress-bar" style="width:${Math.min(Math.abs(parseFloat(pct)), 100)}%">${parseFloat(pct) > 5 ? escapeHtml(pct) + '%' : ''}</div>
       </div></td>
     </tr>`;
   }).join('');
 
-  // charts
+  // Train/test metrics
+  const ttSection = document.getElementById('traintest-section-opt');
+  if (s.train_sharpe != null) {
+    const ttMetrics = [
+      { label: 'Train 샤프', value: s.train_sharpe },
+      { label: 'Train 소르티노', value: s.train_sortino },
+      { label: 'Test 샤프', value: s.test_sharpe },
+      { label: 'Test 소르티노', value: s.test_sortino },
+    ];
+    document.getElementById('traintest-cards-opt').innerHTML = ttMetrics.map(m => `
+      <div class="col-3">
+        <div class="summary-card" style="background:#546e7a">
+          <h6>${m.label}</h6>
+          <div class="value">${escapeHtml(String(m.value))}</div>
+        </div>
+      </div>
+    `).join('');
+    ttSection.classList.remove('d-none');
+  } else {
+    ttSection.classList.add('d-none');
+  }
+
+  // Charts
   const ch = data.charts;
   const config = { responsive: true, displayModeBar: true };
 
-  Plotly.react('chart-weights', ch.weights.data, ch.weights.layout, config);
-  Plotly.react('chart-cumulative', ch.cumulative.data, ch.cumulative.layout, config);
-  if (ch.frontier && ch.frontier.data) {
-    Plotly.react('chart-frontier', ch.frontier.data, ch.frontier.layout, config);
-  }
-  Plotly.react('chart-distribution', ch.distribution.data, ch.distribution.layout, config);
-  Plotly.react('chart-correlation', ch.correlation.data, ch.correlation.layout, config);
-  Plotly.react('chart-drawdown', ch.drawdown.data, ch.drawdown.layout, config);
+  if (ch.backtest_split && ch.backtest_split.data) Plotly.react('chart-backtest-split', ch.backtest_split.data, ch.backtest_split.layout, config);
+  if (ch.portfolio_summary && ch.portfolio_summary.data) Plotly.react('chart-portfolio-summary', ch.portfolio_summary.data, ch.portfolio_summary.layout, config);
+  if (ch.scenario_distribution && ch.scenario_distribution.data) Plotly.react('chart-scenario-dist', ch.scenario_distribution.data, ch.scenario_distribution.layout, config);
+  if (ch.benchmark_comparison && ch.benchmark_comparison.data) Plotly.react('chart-benchmark-bar', ch.benchmark_comparison.data, ch.benchmark_comparison.layout, config);
 
-  // show sections
-  document.getElementById('summary-section').classList.remove('d-none');
-  document.getElementById('weight-section').classList.remove('d-none');
-  document.getElementById('charts-section').classList.remove('d-none');
-  document.getElementById('placeholder').classList.add('d-none');
+  document.getElementById('summary-section-opt').classList.remove('d-none');
+  document.getElementById('weight-section-opt').classList.remove('d-none');
+  document.getElementById('charts-section-opt').classList.remove('d-none');
+  document.getElementById('placeholder-opt').classList.add('d-none');
+}
+
+// ===== Feature 2: Frontier Analysis =====
+async function runFrontierAnalysis() {
+  const tickers = state.fr.tickers;
+  if (tickers.length < 2) { alert('종목을 2개 이상 추가해주세요.'); return; }
+
+  showSpinner('효율적 프론티어 계산 중...');
+  document.getElementById('run-btn-fr').disabled = true;
+
+  const body = {
+    tickers,
+    start_date: document.getElementById('start-date-fr').value,
+    end_date: document.getElementById('end-date-fr').value,
+    confidence_level: parseFloat(document.getElementById('confidence-fr').value),
+    min_weight: parseFloat(document.getElementById('min-weight-fr').value),
+    max_weight: parseFloat(document.getElementById('max-weight-fr').value),
+    min_exp: parseFloat(document.getElementById('min-exp-fr').value),
+    max_exp: parseFloat(document.getElementById('max-exp-fr').value),
+    n_steps: parseInt(document.getElementById('n-steps-fr').value),
+    custom_portfolio: getCustomPortfolio(),
+  };
+
+  // Store params for CSV export
+  state.fr.lastParams = body;
+
+  try {
+    const resp = await fetch('/api/frontier', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json();
+    if (data.error) { alert('오류: ' + data.error); return; }
+    state.fr.frontierData = data.frontier_data;
+    showFrontierResults(data);
+  } catch (err) {
+    alert('요청 실패: ' + err.message);
+  } finally {
+    hideSpinner();
+    document.getElementById('run-btn-fr').disabled = false;
+  }
+}
+
+function showFrontierResults(data) {
+  const s = data.summary;
+  const tang = s.tangent;
+
+  // Summary cards
+  const metrics = [
+    { label: '프론티어 포인트', value: s.n_points + '개', color: '#667eea' },
+    { label: '접선 수익률', value: tang.expected_return + '%', color: '#2ecc71' },
+    { label: '접선 CVaR', value: tang.cvar + '%', color: '#e74c3c' },
+    { label: '접선 변동성', value: tang.volatility + '%', color: '#f39c12' },
+  ];
+  if (s.custom_eval) {
+    metrics.push(
+      { label: '비교 수익률', value: s.custom_eval.expected_return + '%', color: '#8e44ad' },
+      { label: '비교 샤프', value: s.custom_eval.sharpe, color: '#3498db' },
+    );
+  }
+  document.getElementById('summary-cards-fr').innerHTML = metrics.map(m => `
+    <div class="col-md-3 col-6">
+      <div class="summary-card" style="background:${m.color}">
+        <h6>${m.label}</h6>
+        <div class="value">${escapeHtml(String(m.value))}</div>
+      </div>
+    </div>
+  `).join('');
+
+  // Tangent portfolio table
+  const sorted = Object.entries(tang.weights).sort((a, b) => b[1] - a[1]);
+  document.getElementById('tangent-tbody-fr').innerHTML = sorted.map(([tk, w]) => {
+    const pct = (w * 100).toFixed(2);
+    return `<tr>
+      <td class="fw-semibold">${escapeHtml(tk)}</td>
+      <td>${escapeHtml(pct)}%</td>
+      <td><div class="progress" style="height:18px">
+        <div class="progress-bar" style="width:${Math.min(Math.abs(parseFloat(pct)), 100)}%">${parseFloat(pct) > 5 ? escapeHtml(pct) + '%' : ''}</div>
+      </div></td>
+    </tr>`;
+  }).join('');
+
+  // Charts
+  const ch = data.charts;
+  const config = { responsive: true, displayModeBar: true };
+
+  if (ch.frontier_overlay && ch.frontier_overlay.data) Plotly.react('chart-frontier-overlay', ch.frontier_overlay.data, ch.frontier_overlay.layout, config);
+  if (ch.weights_heatmap && ch.weights_heatmap.data) Plotly.react('chart-weights-heatmap', ch.weights_heatmap.data, ch.weights_heatmap.layout, config);
+  if (ch.lambda_profile && ch.lambda_profile.data) Plotly.react('chart-lambda-profile', ch.lambda_profile.data, ch.lambda_profile.layout, config);
+
+  document.getElementById('summary-section-fr').classList.remove('d-none');
+  document.getElementById('tangent-section-fr').classList.remove('d-none');
+  document.getElementById('charts-section-fr').classList.remove('d-none');
+  document.getElementById('placeholder-fr').classList.add('d-none');
+}
+
+// ===== CSV export =====
+async function exportFrontierCSV() {
+  if (!state.fr.lastParams) { alert('먼저 프론티어 분석을 실행해주세요.'); return; }
+
+  showSpinner('CSV 생성 중...');
+  try {
+    const resp = await fetch('/api/frontier/export', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(state.fr.lastParams),
+    });
+    if (!resp.ok) {
+      const err = await resp.json();
+      alert('오류: ' + (err.error || '알 수 없는 오류'));
+      return;
+    }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'frontier.csv';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    alert('다운로드 실패: ' + err.message);
+  } finally {
+    hideSpinner();
+  }
 }
 </script>
 </body>
