@@ -1,39 +1,74 @@
 """
-Mean-CVaR Portfolio Optimization Engine
+Mean-CVaR Portfolio Optimization Engine (cufolio backend)
 
-Implements the Rockafellar & Uryasev (2000) linear programming formulation
-of Conditional Value-at-Risk portfolio optimization.
-
-Workflow mirrors NVIDIA's cvar_basic.ipynb:
-  1. Data preparation  - download prices, compute returns
-  2. Scenario generation - historical returns as CVaR scenarios
-  3. Optimization        - solve Mean-CVaR LP
-  4. Backtest            - evaluate portfolio performance
+Uses NVIDIA's cufolio library from quantitative-portfolio-optimization:
+  - cvar_optimizer.CVaR  for LP/MILP optimization (CVXPY + cuOpt/CLARABEL)
+  - cvar_utils           for scenario generation (KDE/Gaussian/Historical)
+  - backtest             for portfolio backtesting
+  - Portfolio, CvarParameters, CvarData  data structures
 """
 
+import logging
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from scipy.optimize import linprog, milp, LinearConstraint, Bounds
+import cvxpy as cp
 from dataclasses import dataclass, field
 
-from scenarios import ReturnType, ScenarioMethod, compute_returns as sc_compute_returns, generate_scenarios as sc_generate_scenarios
+from cufolio import cvar_optimizer, cvar_utils
+from cufolio.cvar_parameters import CvarParameters
+from cufolio.cvar_data import CvarData
+from cufolio.portfolio import Portfolio
+from cufolio import backtest as cufolio_backtest
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Data classes
+# Solver detection
+# ---------------------------------------------------------------------------
+def _detect_solver_settings() -> dict:
+    """Detect best available CVXPY solver.  Prefer cuOpt GPU, fallback CLARABEL."""
+    solvers = cp.installed_solvers()
+    if "CUOPT" in solvers:
+        return {
+            "solver": cp.CUOPT,
+            "verbose": False,
+            "solver_method": "PDLP",
+            "time_limit": 30,
+        }
+    return {
+        "solver": cp.CLARABEL,
+        "verbose": False,
+        "tol_gap_abs": 1e-4,
+        "tol_gap_rel": 1e-4,
+        "tol_feas": 1e-4,
+    }
+
+
+def _detect_kde_device() -> str:
+    """Detect whether cuML GPU KDE is available."""
+    try:
+        import cuml.neighbors  # noqa: F401
+        return "GPU"
+    except Exception:
+        return "CPU"
+
+
+# ---------------------------------------------------------------------------
+# Data classes  (kept for webapp API compatibility)
 # ---------------------------------------------------------------------------
 @dataclass
 class OptimizationParams:
     tickers: list[str]
     start_date: str
     end_date: str
-    confidence_level: float = 0.95       # beta for CVaR
-    risk_aversion: float = 0.5           # lambda  (0=min-risk, 1=max-return)
-    min_weight: float = 0.0              # per-asset lower bound
-    max_weight: float = 1.0              # per-asset upper bound
-    target_return: float | None = None   # optional target return constraint
-    risk_free_rate: float = 0.04         # annualised risk-free rate
+    confidence_level: float = 0.95
+    risk_aversion: float = 0.5
+    min_weight: float = 0.0
+    max_weight: float = 1.0
+    target_return: float | None = None
+    risk_free_rate: float = 0.04
 
 
 @dataclass
@@ -47,44 +82,104 @@ class OptimizationResult:
     prices_df: pd.DataFrame
     returns_df: pd.DataFrame
     cumulative_portfolio: pd.Series
-    cumulative_benchmark: pd.DataFrame   # equal-weight & individual
+    cumulative_benchmark: pd.DataFrame
     efficient_frontier: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class AdvancedOptimizationParams:
+    tickers: list[str]
+    start_date: str
+    end_date: str
+    confidence_level: float = 0.95
+    risk_aversion: float = 0.5
+    min_weight: float = 0.0
+    max_weight: float = 1.0
+    risk_free_rate: float = 0.04
+    # Scenario settings
+    return_type: str = "log"          # simple / log
+    scenario_method: str = "kde"      # historical / kde / gaussian
+    num_scenarios: int = 10000
+    kde_bandwidth: float = 0.01
+    kde_kernel: str = "gaussian"
+    # Per-asset bounds
+    asset_bounds: list[dict] = field(default_factory=list)
+    # Cash allocation
+    cash_min: float = 0.0
+    cash_max: float = 0.0
+    # Leverage
+    leverage_target: float = 1.0
+    # Turnover
+    turnover_target: float | None = None
+    current_weights: list[float] | None = None
+    # CVaR limit
+    cvar_limit: float | None = None
+    # Cardinality
+    max_assets: int | None = None
+    # Backtest
+    test_split_date: str | None = None
+    benchmark_portfolios: dict[str, list[float]] | None = None
+
+
+@dataclass
+class BacktestResult:
+    sharpe: float
+    sortino: float
+    max_drawdown: float
+    annual_return: float
+    annual_vol: float
+    cumulative: pd.Series
+    train_sharpe: float | None = None
+    train_sortino: float | None = None
+    test_sharpe: float | None = None
+    test_sortino: float | None = None
+    split_date: str | None = None
+    benchmark_metrics: dict | None = None
+    cumulative_benchmarks: pd.DataFrame | None = None
+
+
+@dataclass
+class AdvancedOptimizationResult:
+    weights: dict[str, float]
+    cash_weight: float
+    expected_return: float
+    cvar: float
+    volatility: float
+    sharpe_ratio: float
+    sortino_ratio: float
+    max_drawdown: float
+    confidence_level: float
+    prices_df: pd.DataFrame
+    returns_df: pd.DataFrame
+    scenarios: np.ndarray
+    historical_returns: np.ndarray
+    backtest: BacktestResult
+    params: AdvancedOptimizationParams
 
 
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
 def validate_params(params: OptimizationParams) -> None:
-    """Validate optimization parameters. Raises ValueError on bad input."""
     if not (0.90 <= params.confidence_level <= 0.99):
         raise ValueError(
             f"confidence_level must be in [0.90, 0.99], got {params.confidence_level}. "
             "A value of 1.0 causes division by zero in the CVaR formulation."
         )
     if not (0.0 <= params.risk_aversion <= 1.0):
-        raise ValueError(
-            f"risk_aversion must be in [0.0, 1.0], got {params.risk_aversion}."
-        )
+        raise ValueError(f"risk_aversion must be in [0.0, 1.0], got {params.risk_aversion}.")
     if not (-1.0 <= params.min_weight <= 1.0):
-        raise ValueError(
-            f"min_weight must be in [-1.0, 1.0], got {params.min_weight}."
-        )
+        raise ValueError(f"min_weight must be in [-1.0, 1.0], got {params.min_weight}.")
     if not (-1.0 <= params.max_weight <= 1.0):
-        raise ValueError(
-            f"max_weight must be in [-1.0, 1.0], got {params.max_weight}."
-        )
+        raise ValueError(f"max_weight must be in [-1.0, 1.0], got {params.max_weight}.")
     if params.min_weight > params.max_weight:
-        raise ValueError(
-            f"min_weight ({params.min_weight}) must be <= max_weight ({params.max_weight})."
-        )
+        raise ValueError(f"min_weight ({params.min_weight}) must be <= max_weight ({params.max_weight}).")
     if len(params.tickers) < 2:
-        raise ValueError(
-            f"At least 2 tickers are required, got {len(params.tickers)}."
-        )
+        raise ValueError(f"At least 2 tickers are required, got {len(params.tickers)}.")
 
 
 # ---------------------------------------------------------------------------
-# 1. Data preparation
+# Data preparation
 # ---------------------------------------------------------------------------
 def fetch_prices(tickers: list[str], start: str, end: str) -> pd.DataFrame:
     """Download adjusted close prices via yfinance."""
@@ -97,107 +192,285 @@ def fetch_prices(tickers: list[str], start: str, end: str) -> pd.DataFrame:
     return df
 
 
+def _build_returns_dict(
+    prices: pd.DataFrame,
+    return_type: str = "LOG",
+    regime_name: str = "webapp",
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict:
+    """Convert prices DataFrame to cufolio's returns_dict format."""
+    rt = return_type.upper()
+    if rt == "LOG":
+        returns_df = np.log(prices / prices.shift(1)).dropna()
+    else:
+        returns_df = (prices / prices.shift(1) - 1).dropna()
+
+    returns_array = returns_df.to_numpy()
+    m = np.mean(returns_array, axis=0)
+    cov = np.cov(returns_array.T)
+    if cov.ndim == 0:
+        cov = np.array([[float(cov)]])
+
+    return {
+        "return_type": rt,
+        "returns": returns_df,
+        "regime": {
+            "name": regime_name,
+            "range": (
+                start_date or str(prices.index[0].date()),
+                end_date or str(prices.index[-1].date()),
+            ),
+        },
+        "dates": returns_df.index,
+        "mean": m,
+        "covariance": cov,
+        "tickers": list(returns_df.columns),
+    }
+
+
+def _generate_scenarios(returns_dict: dict, params) -> dict:
+    """Generate scenarios using cufolio (supports KDE GPU/CPU, Gaussian, Historical)."""
+    method_map = {"historical": "no_fit", "kde": "kde", "gaussian": "gaussian"}
+    fit_type = method_map.get(
+        getattr(params, "scenario_method", "historical"), "no_fit"
+    )
+
+    num_scen = getattr(params, "num_scenarios", 0)
+    if num_scen <= 0:
+        num_scen = len(returns_dict["returns"])
+
+    kde_device = _detect_kde_device()
+    bandwidth = getattr(params, "kde_bandwidth", 0.01)
+    kernel = getattr(params, "kde_kernel", "gaussian")
+
+    scenario_settings = {
+        "num_scen": num_scen,
+        "fit_type": fit_type,
+        "kde_settings": {
+            "bandwidth": bandwidth,
+            "kernel": kernel,
+            "device": kde_device,
+        },
+        "verbose": False,
+    }
+
+    try:
+        returns_dict = cvar_utils.generate_cvar_data(returns_dict, scenario_settings)
+    except Exception as e:
+        # GPU KDE may fail on small GPUs, fallback to CPU
+        if kde_device == "GPU":
+            logger.warning("GPU KDE failed (%s), falling back to CPU", e)
+            scenario_settings["kde_settings"]["device"] = "CPU"
+            returns_dict = cvar_utils.generate_cvar_data(returns_dict, scenario_settings)
+        else:
+            raise
+
+    return returns_dict
+
+
+# ---------------------------------------------------------------------------
+# cufolio CvarParameters builder
+# ---------------------------------------------------------------------------
+def _build_cvar_params(params, tickers: list[str]) -> CvarParameters:
+    """Build cufolio CvarParameters from webapp params."""
+    # Weight bounds
+    w_min = getattr(params, "min_weight", 0.0)
+    w_max = getattr(params, "max_weight", 1.0)
+
+    # Per-asset bounds
+    asset_bounds = getattr(params, "asset_bounds", [])
+    if asset_bounds:
+        w_min_dict = {}
+        w_max_dict = {}
+        ab_map = {ab["ticker"]: ab for ab in asset_bounds if "ticker" in ab}
+        for t in tickers:
+            if t in ab_map:
+                w_min_dict[t] = ab_map[t].get("min", w_min)
+                w_max_dict[t] = ab_map[t].get("max", w_max)
+            else:
+                w_min_dict[t] = w_min
+                w_max_dict[t] = w_max
+        w_min_dict["others"] = w_min
+        w_max_dict["others"] = w_max
+        w_min = w_min_dict
+        w_max = w_max_dict
+
+    # Cash
+    c_min = getattr(params, "cash_min", 0.0)
+    c_max = getattr(params, "cash_max", 0.0)
+
+    # Leverage
+    L_tar = getattr(params, "leverage_target", 1.0)
+
+    # Turnover
+    T_tar = getattr(params, "turnover_target", None)
+
+    # CVaR limit
+    cvar_limit = getattr(params, "cvar_limit", None)
+    if cvar_limit is not None:
+        cvar_limit = cvar_limit / 100.0  # webapp sends as %
+
+    # Cardinality
+    cardinality = getattr(params, "max_assets", None)
+
+    # Risk aversion and confidence
+    risk_aversion = getattr(params, "risk_aversion", 1.0)
+    confidence = getattr(params, "confidence_level", 0.95)
+
+    return CvarParameters(
+        w_min=w_min,
+        w_max=w_max,
+        c_min=c_min,
+        c_max=c_max,
+        L_tar=L_tar,
+        T_tar=T_tar,
+        cvar_limit=cvar_limit,
+        cardinality=cardinality,
+        risk_aversion=risk_aversion,
+        confidence=confidence,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Solve with cufolio
+# ---------------------------------------------------------------------------
+def _solve_cvar(returns_dict: dict, cvar_params: CvarParameters,
+                existing_portfolio: Portfolio | None = None):
+    """
+    Build and solve CVaR problem using cufolio.
+    Returns (result_row, portfolio) from cufolio.
+    Tries cuOpt GPU first, falls back to CLARABEL CPU.
+    """
+    solver_settings = _detect_solver_settings()
+
+    cvar_problem = cvar_optimizer.CVaR(
+        returns_dict=returns_dict,
+        cvar_params=cvar_params,
+        existing_portfolio=existing_portfolio,
+    )
+
+    try:
+        result_row, portfolio = cvar_problem.solve_optimization_problem(
+            solver_settings=solver_settings,
+            print_results=False,
+        )
+    except Exception as e:
+        # If cuOpt fails, try CLARABEL
+        if solver_settings.get("solver") == cp.CUOPT:
+            logger.warning("cuOpt solver failed (%s), falling back to CLARABEL", e)
+            fallback = {
+                "solver": cp.CLARABEL,
+                "verbose": False,
+                "tol_gap_abs": 1e-4,
+                "tol_gap_rel": 1e-4,
+                "tol_feas": 1e-4,
+            }
+            # Rebuild problem for CLARABEL
+            cvar_problem = cvar_optimizer.CVaR(
+                returns_dict=returns_dict,
+                cvar_params=cvar_params,
+                existing_portfolio=existing_portfolio,
+            )
+            result_row, portfolio = cvar_problem.solve_optimization_problem(
+                solver_settings=fallback,
+                print_results=False,
+            )
+        else:
+            raise
+
+    return result_row, portfolio, cvar_problem
+
+
+# ---------------------------------------------------------------------------
+# Backtest helpers
+# ---------------------------------------------------------------------------
+def _compute_sortino(daily_returns: np.ndarray, rf_daily: float = 0.0) -> float:
+    excess = daily_returns - rf_daily
+    downside = excess[excess < 0]
+    if len(downside) == 0:
+        return 0.0
+    downside_std = np.sqrt(np.mean(downside ** 2)) * np.sqrt(252)
+    annual_ret = np.mean(daily_returns) * 252
+    return (annual_ret - rf_daily * 252) / downside_std if downside_std > 0 else 0.0
+
+
+def _compute_max_drawdown(cumulative: pd.Series) -> float:
+    running_max = cumulative.cummax()
+    dd = (cumulative - running_max) / running_max
+    return float(-dd.min() * 100) if len(dd) > 0 else 0.0
+
+
+# ---------------------------------------------------------------------------
+# Basic optimization (backward compatible)
+# ---------------------------------------------------------------------------
 def compute_returns(prices: pd.DataFrame) -> pd.DataFrame:
     """Simple daily returns."""
     return (prices / prices.shift(1) - 1).dropna()
 
 
-# ---------------------------------------------------------------------------
-# 2. Scenario generation  (historical simulation)
-# ---------------------------------------------------------------------------
 def generate_scenarios(returns: pd.DataFrame) -> np.ndarray:
-    """Each historical day is one scenario.  Shape: (S, N)."""
+    """Each historical day is one scenario."""
     return returns.values
 
 
-# ---------------------------------------------------------------------------
-# 3. Mean-CVaR optimisation  (Rockafellar-Uryasev LP)
-# ---------------------------------------------------------------------------
 def optimize_cvar(
     scenarios: np.ndarray,
     mean_returns: np.ndarray,
     params: OptimizationParams,
 ) -> tuple[np.ndarray, float]:
     """
-    Solve:
-        max   lambda * mu'w  -  (1-lambda) * CVaR_beta(w)
-
-    Reformulated as LP  (minimisation):
-        min  -(lambda) * mu'w  +  (1-lambda) * [ alpha + 1/((1-beta)*S) * sum z_s ]
-
-        s.t.  z_s  >=  -(r_s' w) - alpha       for all s
-              z_s  >=  0                         for all s
-              sum w_i = 1
-              lo <= w_i <= hi
-
-    Decision variables:  x = [w_1..w_N, alpha, z_1..z_S]
-
-    Returns (weights, cvar) where cvar is derived from the LP solution.
+    Wrapper for basic CVaR optimization via cufolio.
+    Kept for backward compatibility with frontier.py.
     """
-    S, N = scenarios.shape
+    # Build a minimal returns_dict
+    n_assets = len(mean_returns)
+    tickers = params.tickers if hasattr(params, "tickers") else [f"A{i}" for i in range(n_assets)]
+
+    # CvarData: R is (n_assets, num_scenarios), scenarios input is (S, N)
+    R = scenarios.T  # (N, S)
+    S = scenarios.shape[0]
+    p = np.ones(S) / S
+    cvar_data = CvarData(mean=mean_returns, R=R, p=p)
+
+    cov = np.cov(scenarios.T)
+    if cov.ndim == 0:
+        cov = np.array([[float(cov)]])
+
+    returns_dict = {
+        "return_type": "LOG",
+        "returns": pd.DataFrame(scenarios, columns=tickers),
+        "regime": {"name": "basic", "range": (params.start_date, params.end_date)},
+        "dates": pd.RangeIndex(S),
+        "mean": mean_returns,
+        "covariance": cov,
+        "tickers": tickers,
+        "cvar_data": cvar_data,
+    }
+
+    cvar_params = CvarParameters(
+        w_min=params.min_weight,
+        w_max=params.max_weight,
+        c_min=0.0,
+        c_max=0.0,
+        L_tar=1.0,
+        risk_aversion=params.risk_aversion,
+        confidence=params.confidence_level,
+    )
+
+    _, portfolio, _ = _solve_cvar(returns_dict, cvar_params)
+
+    weights = np.array(portfolio.weights)
+    # Compute CVaR from portfolio
+    port_scen = scenarios @ weights
     beta = params.confidence_level
-    lam = params.risk_aversion
-
-    # number of variables
-    n_vars = N + 1 + S  # weights + alpha + auxiliary z
-
-    # ---- objective ----
-    c = np.zeros(n_vars)
-    # weights part:  -lambda * mu
-    c[:N] = -lam * mean_returns
-    # alpha part:  (1-lambda) * 1
-    c[N] = (1 - lam)
-    # z part:  (1-lambda) / ((1-beta)*S)
-    c[N + 1:] = (1 - lam) / ((1 - beta) * S)
-
-    # ---- inequality constraints:  z_s >= -r_s'w - alpha  ->  r_s'w + alpha + z_s >= 0
-    #      linprog format:  A_ub @ x <= b_ub   ->  -(r_s'w + alpha + z_s) <= 0
-    A_ub = np.zeros((S, n_vars))
-    A_ub[:, :N] = -scenarios          # -r_s * w
-    A_ub[:, N] = -1.0                 # -alpha
-    for s in range(S):
-        A_ub[s, N + 1 + s] = -1.0    # -z_s
-    b_ub = np.zeros(S)
-
-    # ---- equality: sum w_i = 1
-    A_eq = np.zeros((1, n_vars))
-    A_eq[0, :N] = 1.0
-    b_eq = np.array([1.0])
-
-    # optional target-return constraint:  mu'w >= target  ->  -mu'w <= -target
-    if params.target_return is not None:
-        row = np.zeros((1, n_vars))
-        row[0, :N] = -mean_returns
-        A_ub = np.vstack([A_ub, row])
-        b_ub = np.append(b_ub, -params.target_return)
-
-    # ---- bounds ----
-    bounds = []
-    for _ in range(N):
-        bounds.append((params.min_weight, params.max_weight))
-    bounds.append((None, None))  # alpha unbounded
-    for _ in range(S):
-        bounds.append((0, None))  # z_s >= 0
-
-    result = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq,
-                     bounds=bounds, method="highs")
-
-    if not result.success:
-        raise RuntimeError(f"Optimization failed: {result.message}")
-
-    weights = result.x[:N]
-
-    # compute CVaR directly from the LP solution variables
-    alpha = result.x[N]
-    z_values = result.x[N + 1:]
-    cvar = alpha + z_values.sum() / ((1 - beta) * S)
+    var_threshold = np.percentile(port_scen, (1 - beta) * 100)
+    tail = port_scen[port_scen <= var_threshold]
+    cvar = float(tail.mean()) if len(tail) > 0 else float(var_threshold)
 
     return weights, cvar
 
 
-# ---------------------------------------------------------------------------
-# 4. Efficient frontier
-# ---------------------------------------------------------------------------
 def compute_efficient_frontier(
     scenarios: np.ndarray,
     mean_returns: np.ndarray,
@@ -231,9 +504,6 @@ def compute_efficient_frontier(
     return frontier
 
 
-# ---------------------------------------------------------------------------
-# 5. Backtest
-# ---------------------------------------------------------------------------
 def backtest(
     weights: np.ndarray,
     returns: pd.DataFrame,
@@ -241,70 +511,44 @@ def backtest(
     """Cumulative returns for optimal portfolio & benchmarks."""
     port_daily = (returns * weights).sum(axis=1)
     cum_port = (1 + port_daily).cumprod()
-
-    # equal-weight benchmark
     eq_daily = returns.mean(axis=1)
     cum_eq = (1 + eq_daily).cumprod()
-
-    # individual assets
     cum_indiv = (1 + returns).cumprod()
-
     benchmark = cum_indiv.copy()
     benchmark["EqualWeight"] = cum_eq
-
     return cum_port, benchmark
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# Public API: basic optimization
 # ---------------------------------------------------------------------------
 def run_optimization(params: OptimizationParams) -> OptimizationResult:
     """Full pipeline: data -> scenarios -> optimise -> backtest."""
-
-    # 0. validate
     validate_params(params)
 
-    # 1. data
     prices = fetch_prices(params.tickers, params.start_date, params.end_date)
-
     if prices.empty:
         raise ValueError("No price data found for the given tickers and date range.")
 
     returns = compute_returns(prices)
-
     if len(returns) < 30:
-        raise ValueError(
-            f"Insufficient data: only {len(returns)} trading days found. "
-            "At least 30 required."
-        )
+        raise ValueError(f"Insufficient data: only {len(returns)} trading days found. At least 30 required.")
 
-    # check for tickers dropped entirely
     missing = set(params.tickers) - set(returns.columns)
     if missing:
-        raise ValueError(
-            f"No data returned for ticker(s): {', '.join(sorted(missing))}. "
-            "Check symbols and date range."
-        )
+        raise ValueError(f"No data returned for ticker(s): {', '.join(sorted(missing))}. Check symbols and date range.")
 
-    # 2. scenarios
     scenarios = generate_scenarios(returns)
     mean_ret = returns.mean().values
 
-    # 3. optimise
     weights, cvar = optimize_cvar(scenarios, mean_ret, params)
-
-    # 4. efficient frontier
     frontier = compute_efficient_frontier(scenarios, mean_ret, params)
-
-    # 5. backtest
     cum_port, cum_bench = backtest(weights, returns)
 
-    # summary stats
     port_return = float(mean_ret @ weights) * 252
     port_vol = float(np.sqrt((scenarios @ weights).var()) * np.sqrt(252))
     rf = params.risk_free_rate
     sharpe = (port_return - rf) / port_vol if port_vol > 0 else 0.0
-
     weight_dict = {t: round(float(w), 6) for t, w in zip(params.tickers, weights)}
 
     return OptimizationResult(
@@ -323,336 +567,8 @@ def run_optimization(params: OptimizationParams) -> OptimizationResult:
 
 
 # ===========================================================================
-# ADVANCED CVaR OPTIMIZATION  (Feature 1)
+# ADVANCED CVaR OPTIMIZATION  (Feature 1) — using cufolio
 # ===========================================================================
-
-@dataclass
-class AdvancedOptimizationParams:
-    tickers: list[str]
-    start_date: str
-    end_date: str
-    confidence_level: float = 0.95
-    risk_aversion: float = 0.5
-    min_weight: float = 0.0
-    max_weight: float = 1.0
-    risk_free_rate: float = 0.04
-    # Scenario settings
-    return_type: str = "simple"       # simple / log
-    scenario_method: str = "historical"  # historical / kde / gaussian
-    num_scenarios: int = 0            # 0 = use all historical observations
-    kde_bandwidth: float = 0.5
-    kde_kernel: str = "gaussian"
-    # Per-asset bounds: [{"ticker": "AAPL", "min": 0.0, "max": 0.3}, ...]
-    asset_bounds: list[dict] = field(default_factory=list)
-    # Cash allocation
-    cash_min: float = 0.0
-    cash_max: float = 0.0
-    # Leverage
-    leverage_target: float = 1.0      # sum of |weights| target
-    # Turnover
-    turnover_target: float | None = None
-    current_weights: list[float] | None = None
-    # CVaR limit
-    cvar_limit: float | None = None   # maximum allowable CVaR (daily %)
-    # Cardinality
-    max_assets: int | None = None     # triggers MILP
-    # Backtest
-    test_split_date: str | None = None
-    benchmark_portfolios: dict[str, list[float]] | None = None  # name -> weights
-
-
-@dataclass
-class BacktestResult:
-    sharpe: float
-    sortino: float
-    max_drawdown: float
-    annual_return: float
-    annual_vol: float
-    cumulative: pd.Series
-    # Train/test split results
-    train_sharpe: float | None = None
-    train_sortino: float | None = None
-    test_sharpe: float | None = None
-    test_sortino: float | None = None
-    split_date: str | None = None
-    # Benchmark comparison
-    benchmark_metrics: dict | None = None   # name -> {sharpe, sortino, max_dd, cumulative}
-    cumulative_benchmarks: pd.DataFrame | None = None
-
-
-@dataclass
-class AdvancedOptimizationResult:
-    weights: dict[str, float]
-    cash_weight: float
-    expected_return: float
-    cvar: float
-    volatility: float
-    sharpe_ratio: float
-    sortino_ratio: float
-    max_drawdown: float
-    confidence_level: float
-    prices_df: pd.DataFrame
-    returns_df: pd.DataFrame
-    scenarios: np.ndarray
-    historical_returns: np.ndarray
-    backtest: BacktestResult
-    params: AdvancedOptimizationParams
-
-
-def _compute_sortino(daily_returns: np.ndarray, rf_daily: float = 0.0) -> float:
-    """Sortino ratio: excess return / downside deviation."""
-    excess = daily_returns - rf_daily
-    downside = excess[excess < 0]
-    if len(downside) == 0:
-        return 0.0
-    downside_std = np.sqrt(np.mean(downside ** 2)) * np.sqrt(252)
-    annual_ret = np.mean(daily_returns) * 252
-    return (annual_ret - rf_daily * 252) / downside_std if downside_std > 0 else 0.0
-
-
-def _compute_max_drawdown(cumulative: pd.Series) -> float:
-    """Maximum drawdown as a positive percentage."""
-    running_max = cumulative.cummax()
-    dd = (cumulative - running_max) / running_max
-    return float(-dd.min() * 100) if len(dd) > 0 else 0.0
-
-
-def optimize_cvar_advanced(
-    scenarios: np.ndarray,
-    mean_returns: np.ndarray,
-    params: AdvancedOptimizationParams,
-) -> tuple[np.ndarray, float, float]:
-    """
-    Extended Mean-CVaR LP with cash, leverage, turnover, and CVaR limit.
-
-    Decision variables: x = [w_1..w_N, cash, alpha, z_1..z_S, (t_1..t_N if turnover)]
-
-    Returns (weights_array, cash_weight, cvar).
-    """
-    S, N = scenarios.shape
-    beta = params.confidence_level
-    lam = params.risk_aversion
-    has_cash = params.cash_max > 0
-    has_turnover = (params.turnover_target is not None and
-                    params.current_weights is not None and
-                    len(params.current_weights) == N)
-
-    # Variable layout: [w(N), cash(1), alpha(1), z(S), t(N if turnover)]
-    n_cash = 1
-    n_turnover = N if has_turnover else 0
-    n_vars = N + n_cash + 1 + S + n_turnover
-
-    idx_cash = N
-    idx_alpha = N + 1
-    idx_z = N + 2
-    idx_t = idx_z + S  # only used if has_turnover
-
-    # ---- Objective: min -lam * mu'w + (1-lam) * [alpha + 1/((1-beta)*S) * sum(z)] ----
-    c = np.zeros(n_vars)
-    c[:N] = -lam * mean_returns
-    c[idx_alpha] = (1 - lam)
-    c[idx_z:idx_z + S] = (1 - lam) / ((1 - beta) * S)
-
-    # ---- Inequality constraints ----
-    ub_rows = []
-    ub_rhs = []
-
-    # z_s >= -r_s'w - alpha  =>  -r_s'w - alpha - z_s <= 0
-    A_cvar = np.zeros((S, n_vars))
-    A_cvar[:, :N] = -scenarios
-    A_cvar[:, idx_alpha] = -1.0
-    for s in range(S):
-        A_cvar[s, idx_z + s] = -1.0
-    ub_rows.append(A_cvar)
-    ub_rhs.append(np.zeros(S))
-
-    # CVaR limit: alpha + 1/((1-beta)*S) * sum(z) <= cvar_limit
-    if params.cvar_limit is not None:
-        row = np.zeros((1, n_vars))
-        row[0, idx_alpha] = 1.0
-        row[0, idx_z:idx_z + S] = 1.0 / ((1 - beta) * S)
-        ub_rows.append(row)
-        ub_rhs.append(np.array([params.cvar_limit / 100.0]))  # convert from % to decimal
-
-    # Turnover: |w_i - w_i_current| <= t_i, sum(t_i) <= turnover_target
-    if has_turnover:
-        cur_w = np.array(params.current_weights)
-        # w_i - cur_w_i <= t_i  =>  w_i - t_i <= cur_w_i
-        A_t1 = np.zeros((N, n_vars))
-        for i in range(N):
-            A_t1[i, i] = 1.0
-            A_t1[i, idx_t + i] = -1.0
-        ub_rows.append(A_t1)
-        ub_rhs.append(cur_w)
-        # -(w_i - cur_w_i) <= t_i  =>  -w_i - t_i <= -cur_w_i
-        A_t2 = np.zeros((N, n_vars))
-        for i in range(N):
-            A_t2[i, i] = -1.0
-            A_t2[i, idx_t + i] = -1.0
-        ub_rows.append(A_t2)
-        ub_rhs.append(-cur_w)
-        # sum(t_i) <= turnover_target
-        row = np.zeros((1, n_vars))
-        row[0, idx_t:idx_t + N] = 1.0
-        ub_rows.append(row)
-        ub_rhs.append(np.array([params.turnover_target]))
-
-    A_ub = np.vstack(ub_rows) if ub_rows else None
-    b_ub = np.concatenate(ub_rhs) if ub_rhs else None
-
-    # ---- Equality: sum(w) + cash = leverage_target ----
-    A_eq = np.zeros((1, n_vars))
-    A_eq[0, :N] = 1.0
-    A_eq[0, idx_cash] = 1.0
-    b_eq = np.array([params.leverage_target])
-
-    # ---- Bounds ----
-    # Per-asset bounds
-    asset_bound_map = {}
-    for ab in params.asset_bounds:
-        asset_bound_map[ab.get("ticker", "")] = (ab.get("min", params.min_weight),
-                                                   ab.get("max", params.max_weight))
-    bounds = []
-    for i, ticker in enumerate(params.tickers):
-        lo, hi = asset_bound_map.get(ticker, (params.min_weight, params.max_weight))
-        bounds.append((lo, hi))
-    # Cash bounds
-    bounds.append((params.cash_min, params.cash_max) if has_cash else (0.0, 0.0))
-    # Alpha unbounded
-    bounds.append((None, None))
-    # z >= 0
-    for _ in range(S):
-        bounds.append((0.0, None))
-    # t >= 0 (turnover aux)
-    for _ in range(n_turnover):
-        bounds.append((0.0, None))
-
-    result = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq,
-                     bounds=bounds, method="highs")
-
-    if not result.success:
-        raise RuntimeError(f"Advanced optimization failed: {result.message}")
-
-    weights = result.x[:N]
-    cash = result.x[idx_cash]
-    alpha = result.x[idx_alpha]
-    z_vals = result.x[idx_z:idx_z + S]
-    cvar = alpha + z_vals.sum() / ((1 - beta) * S)
-
-    return weights, float(cash), float(cvar)
-
-
-def optimize_cvar_milp(
-    scenarios: np.ndarray,
-    mean_returns: np.ndarray,
-    params: AdvancedOptimizationParams,
-) -> tuple[np.ndarray, float, float]:
-    """
-    MILP cardinality-constrained CVaR optimization using scipy.optimize.milp.
-
-    Additional binary variables b_i: w_i <= max * b_i, sum(b_i) <= max_assets.
-    """
-    S, N = scenarios.shape
-    beta = params.confidence_level
-    lam = params.risk_aversion
-    max_assets = params.max_assets
-    has_cash = params.cash_max > 0
-
-    # Variables: [w(N), cash(1), alpha(1), z(S), b(N)]
-    n_vars = N + 1 + 1 + S + N
-    idx_cash = N
-    idx_alpha = N + 1
-    idx_z = N + 2
-    idx_b = idx_z + S
-
-    # ---- Objective ----
-    c = np.zeros(n_vars)
-    c[:N] = -lam * mean_returns
-    c[idx_alpha] = (1 - lam)
-    c[idx_z:idx_z + S] = (1 - lam) / ((1 - beta) * S)
-
-    # ---- Constraints via LinearConstraint ----
-    constraint_rows = []
-
-    # CVaR: z_s >= -r_s'w - alpha  =>  r_s'w + alpha + z_s >= 0
-    A_cvar = np.zeros((S, n_vars))
-    A_cvar[:, :N] = scenarios
-    A_cvar[:, idx_alpha] = 1.0
-    for s in range(S):
-        A_cvar[s, idx_z + s] = 1.0
-    constraint_rows.append(LinearConstraint(A_cvar, lb=0.0, ub=np.inf))
-
-    # Budget: sum(w) + cash = leverage_target
-    A_eq = np.zeros((1, n_vars))
-    A_eq[0, :N] = 1.0
-    A_eq[0, idx_cash] = 1.0
-    constraint_rows.append(LinearConstraint(A_eq, lb=params.leverage_target, ub=params.leverage_target))
-
-    # Cardinality linking: w_i <= max_weight * b_i  =>  w_i - max_weight * b_i <= 0
-    A_card = np.zeros((N, n_vars))
-    for i in range(N):
-        A_card[i, i] = 1.0
-        A_card[i, idx_b + i] = -params.max_weight
-    constraint_rows.append(LinearConstraint(A_card, lb=-np.inf, ub=0.0))
-
-    # Also need: w_i >= min_weight * b_i  =>  w_i - min_weight * b_i >= 0
-    if params.min_weight > 0:
-        A_card_lo = np.zeros((N, n_vars))
-        for i in range(N):
-            A_card_lo[i, i] = 1.0
-            A_card_lo[i, idx_b + i] = -params.min_weight
-        constraint_rows.append(LinearConstraint(A_card_lo, lb=0.0, ub=np.inf))
-
-    # sum(b_i) <= max_assets
-    A_max = np.zeros((1, n_vars))
-    A_max[0, idx_b:idx_b + N] = 1.0
-    constraint_rows.append(LinearConstraint(A_max, lb=0, ub=max_assets))
-
-    # CVaR limit
-    if params.cvar_limit is not None:
-        A_cl = np.zeros((1, n_vars))
-        A_cl[0, idx_alpha] = 1.0
-        A_cl[0, idx_z:idx_z + S] = 1.0 / ((1 - beta) * S)
-        constraint_rows.append(LinearConstraint(A_cl, lb=-np.inf, ub=params.cvar_limit / 100.0))
-
-    # ---- Bounds ----
-    lb = np.zeros(n_vars)
-    ub = np.full(n_vars, np.inf)
-
-    # Weights
-    for i in range(N):
-        lb[i] = params.min_weight
-        ub[i] = params.max_weight
-    # Cash
-    lb[idx_cash] = params.cash_min if has_cash else 0.0
-    ub[idx_cash] = params.cash_max if has_cash else 0.0
-    # Alpha unbounded
-    lb[idx_alpha] = -np.inf
-    # z >= 0 (already 0)
-    # Binary b: 0 or 1
-    for i in range(N):
-        lb[idx_b + i] = 0.0
-        ub[idx_b + i] = 1.0
-
-    bounds_obj = Bounds(lb=lb, ub=ub)
-
-    # Integer constraints: binary for b variables
-    integrality = np.zeros(n_vars)
-    integrality[idx_b:idx_b + N] = 1  # 1 = integer (binary due to 0/1 bounds)
-
-    result = milp(c, constraints=constraint_rows, integrality=integrality, bounds=bounds_obj)
-
-    if not result.success:
-        raise RuntimeError(f"MILP optimization failed: {result.message}")
-
-    weights = result.x[:N]
-    cash = result.x[idx_cash]
-    alpha = result.x[idx_alpha]
-    z_vals = result.x[idx_z:idx_z + S]
-    cvar = alpha + z_vals.sum() / ((1 - beta) * S)
-
-    return weights, float(cash), float(cvar)
-
 
 def backtest_advanced(
     weights: np.ndarray,
@@ -663,7 +579,7 @@ def backtest_advanced(
     """Comprehensive backtest with Sharpe, Sortino, MaxDD, train/test, benchmarks."""
     rf_daily = params.risk_free_rate / 252
 
-    port_daily = (returns.values @ weights)
+    port_daily = returns.values @ weights
     cum = pd.Series((1 + port_daily).cumprod(), index=returns.index)
 
     annual_ret = float(np.mean(port_daily) * 252)
@@ -747,8 +663,7 @@ def backtest_advanced(
 
 
 def run_advanced_optimization(params: AdvancedOptimizationParams) -> AdvancedOptimizationResult:
-    """Full advanced pipeline: data -> scenarios -> optimize -> backtest."""
-    # Validate basics
+    """Full advanced pipeline using cufolio: data -> scenarios -> optimize -> backtest."""
     if len(params.tickers) < 2:
         raise ValueError("종목을 2개 이상 입력해주세요.")
     if not (0.90 <= params.confidence_level <= 0.99):
@@ -763,53 +678,84 @@ def run_advanced_optimization(params: AdvancedOptimizationParams) -> AdvancedOpt
     if missing:
         raise ValueError(f"데이터를 찾을 수 없는 종목: {', '.join(sorted(missing))}")
 
-    # 2. Returns
-    rt = ReturnType(params.return_type)
-    returns = sc_compute_returns(prices, rt)
-    if len(returns) < 30:
-        raise ValueError(f"데이터 부족: {len(returns)}일만 확인됨 (최소 30일 필요).")
-
-    # 3. Scenarios
-    sm = ScenarioMethod(params.scenario_method)
-    scenarios = sc_generate_scenarios(
-        returns, sm, params.num_scenarios,
-        params.kde_bandwidth, params.kde_kernel,
+    # 2. Build returns_dict (cufolio format)
+    rt = "LOG" if params.return_type == "log" else "NORMAL"
+    returns_dict = _build_returns_dict(
+        prices, return_type=rt,
+        regime_name="advanced",
+        start_date=params.start_date,
+        end_date=params.end_date,
     )
-    mean_ret = returns.mean().values
-    historical_returns = returns.values
 
-    # 4. Optimize
-    if params.max_assets is not None and params.max_assets < len(params.tickers):
-        weights, cash, cvar = optimize_cvar_milp(scenarios, mean_ret, params)
-    else:
-        weights, cash, cvar = optimize_cvar_advanced(scenarios, mean_ret, params)
+    returns_df = returns_dict["returns"]
+    if len(returns_df) < 30:
+        raise ValueError(f"데이터 부족: {len(returns_df)}일만 확인됨 (최소 30일 필요).")
 
-    # 5. Backtest
-    bt = backtest_advanced(weights, cash, returns, params)
+    historical_returns = returns_df.values
+
+    # 3. Generate scenarios via cufolio (KDE GPU/CPU, Gaussian, Historical)
+    returns_dict = _generate_scenarios(returns_dict, params)
+
+    # 4. Build CvarParameters
+    cvar_params = _build_cvar_params(params, params.tickers)
+
+    # Build existing portfolio for turnover constraint
+    existing_portfolio = None
+    if params.turnover_target is not None and params.current_weights is not None:
+        if len(params.current_weights) == len(params.tickers):
+            existing_portfolio = Portfolio(
+                name="current",
+                tickers=params.tickers,
+                weights=np.array(params.current_weights),
+                cash=0.0,
+            )
+
+    # 5. Solve via cufolio
+    result_row, portfolio, cvar_problem = _solve_cvar(
+        returns_dict, cvar_params, existing_portfolio
+    )
+
+    weights = np.array(portfolio.weights)
+    cash = float(portfolio.cash)
+
+    # Extract metrics from result_row
+    expected_return_daily = float(result_row["return"])
+    cvar_value = float(result_row["CVaR"])
+
+    # 6. Backtest
+    bt = backtest_advanced(weights, cash, returns_df, params)
 
     # Stats
-    port_vol = float(np.std(returns.values @ weights, ddof=1) * np.sqrt(252))
+    mean_ret = returns_dict["mean"]
+    port_vol = float(np.std(returns_df.values @ weights, ddof=1) * np.sqrt(252))
     port_ret = float(mean_ret @ weights) * 252
     rf = params.risk_free_rate
     sharpe = (port_ret - rf) / port_vol if port_vol > 0 else 0.0
     rf_daily = rf / 252
-    port_daily = returns.values @ weights
+    port_daily = returns_df.values @ weights
     sortino = _compute_sortino(port_daily, rf_daily)
 
     weight_dict = {t: round(float(w), 6) for t, w in zip(params.tickers, weights)}
+
+    # Get scenarios for chart display
+    cvar_data = returns_dict.get("cvar_data")
+    if cvar_data is not None:
+        scenarios = cvar_data.R.T  # (S, N) for charts
+    else:
+        scenarios = historical_returns
 
     return AdvancedOptimizationResult(
         weights=weight_dict,
         cash_weight=round(cash, 6),
         expected_return=round(port_ret * 100, 2),
-        cvar=round(cvar * 100, 4),
+        cvar=round(cvar_value * 100, 4),
         volatility=round(port_vol * 100, 2),
         sharpe_ratio=round(sharpe, 4),
         sortino_ratio=round(sortino, 4),
         max_drawdown=bt.max_drawdown,
         confidence_level=params.confidence_level,
         prices_df=prices,
-        returns_df=returns,
+        returns_df=returns_df,
         scenarios=scenarios,
         historical_returns=historical_returns,
         backtest=bt,

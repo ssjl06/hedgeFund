@@ -1,21 +1,27 @@
 """
-Efficient Frontier Analysis with Logarithmic Lambda Sweep
+Efficient Frontier Analysis with Logarithmic Lambda Sweep (cufolio backend)
 
-Mirrors NVIDIA's efficient_frontier.ipynb:
-  - Logarithmic risk-aversion sweep
-  - Custom portfolio overlay evaluation
-  - CSV export of frontier data
+Uses cufolio's cvar_optimizer.CVaR for each lambda point,
+matching NVIDIA's efficient_frontier.ipynb approach.
 """
 
 import io
+import logging
 import numpy as np
 import pandas as pd
+import cvxpy as cp
 from dataclasses import dataclass, field
 
+from cufolio import cvar_optimizer, cvar_utils
+from cufolio.cvar_parameters import CvarParameters
+from cufolio.cvar_data import CvarData
+
 from optimizer import (
-    OptimizationParams, fetch_prices, optimize_cvar,
+    fetch_prices, _build_returns_dict, _generate_scenarios,
+    _detect_solver_settings,
 )
-from scenarios import ReturnType, ScenarioMethod, compute_returns, generate_scenarios
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -28,17 +34,17 @@ class FrontierParams:
     max_weight: float = 1.0
     risk_free_rate: float = 0.04
     # Frontier sweep settings
-    min_exp: float = -3.0       # 10^(-3) = 0.001
-    max_exp: float = 1.0        # 10^1 = 10
+    min_exp: float = -3.0
+    max_exp: float = 1.0
     n_steps: int = 50
     # Scenario settings
-    return_type: str = "simple"
-    scenario_method: str = "historical"
-    num_scenarios: int = 0
-    kde_bandwidth: float = 0.5
+    return_type: str = "log"
+    scenario_method: str = "kde"
+    num_scenarios: int = 10000
+    kde_bandwidth: float = 0.01
     kde_kernel: str = "gaussian"
     # Custom portfolio for overlay
-    custom_portfolio: dict[str, float] = field(default_factory=dict)  # ticker -> weight
+    custom_portfolio: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -62,7 +68,7 @@ class CustomPortfolioEval:
 @dataclass
 class FrontierResult:
     points: list[FrontierPoint]
-    tangent_idx: int              # index of best Sharpe point
+    tangent_idx: int
     custom_eval: CustomPortfolioEval | None
     tickers: list[str]
     prices_df: pd.DataFrame
@@ -71,77 +77,142 @@ class FrontierResult:
 
 
 def compute_logarithmic_frontier(
-    scenarios: np.ndarray,
-    mean_returns: np.ndarray,
+    returns_dict: dict,
     params: FrontierParams,
 ) -> list[FrontierPoint]:
     """
-    Sweep lambda on a logarithmic scale, then normalise to [0, 1]
-    for the CVaR LP formulation.
+    Sweep lambda on a logarithmic scale using cufolio's CVaR optimizer,
+    matching NVIDIA's efficient_frontier.ipynb approach.
 
-    Raw lambdas from logspace: 10^min_exp to 10^max_exp
-    Normalised: lam_norm = raw / (1 + raw), mapping (0, inf) -> (0, 1)
+    Raw lambdas from logspace: 10^min_exp to 10^max_exp (reversed: high to low)
     """
-    raw_lambdas = np.logspace(params.min_exp, params.max_exp, params.n_steps)
-    points = []
+    risk_aversion_list = np.logspace(
+        params.min_exp, params.max_exp, params.n_steps
+    )[::-1]  # high to low like NVIDIA's code
 
-    for raw_lam in raw_lambdas:
-        lam_norm = raw_lam / (1.0 + raw_lam)
-        # Clamp to valid range
-        lam_norm = max(0.01, min(0.99, lam_norm))
+    solver_settings = _detect_solver_settings()
 
-        p = OptimizationParams(
-            tickers=params.tickers,
-            start_date=params.start_date,
-            end_date=params.end_date,
-            confidence_level=params.confidence_level,
-            risk_aversion=lam_norm,
-            min_weight=params.min_weight,
-            max_weight=params.max_weight,
+    # Build base CvarParameters
+    cvar_params = CvarParameters(
+        w_min=params.min_weight,
+        w_max=params.max_weight,
+        c_min=0.0,
+        c_max=0.0,
+        L_tar=1.0,
+        risk_aversion=risk_aversion_list[0],
+        confidence=params.confidence_level,
+    )
+
+    # Build the CVaR problem once, then sweep risk_aversion
+    try:
+        cvar_problem = cvar_optimizer.CVaR(
+            returns_dict=returns_dict,
+            cvar_params=cvar_params,
         )
+    except Exception as e:
+        logger.warning("Failed to create CVaR problem: %s", e)
+        raise RuntimeError(f"CVaR 문제 생성 실패: {e}")
+
+    points = []
+    tickers = returns_dict["tickers"]
+    covariance = returns_dict["covariance"]
+
+    for i, ra_value in enumerate(risk_aversion_list):
         try:
-            w, cvar = optimize_cvar(scenarios, mean_returns, p)
-            port_ret = float(mean_returns @ w) * 252
-            port_vol = float(np.std(scenarios @ w, ddof=1) * np.sqrt(252))
+            cvar_problem.params.update_risk_aversion(ra_value)
+            cvar_problem.risk_aversion_param.value = ra_value
+
+            result_row, portfolio = cvar_problem.solve_optimization_problem(
+                solver_settings=solver_settings,
+                print_results=False,
+            )
+
+            expected_return = float(result_row["return"])
+            cvar_value = float(result_row["CVaR"])
+            variance = portfolio.calculate_portfolio_variance(covariance)
+            volatility = np.sqrt(variance)
+
+            weights_dict = {
+                t: round(float(w), 6)
+                for t, w in zip(tickers, portfolio.weights)
+            }
+
             points.append(FrontierPoint(
-                lambda_val=round(float(raw_lam), 6),
-                expected_return=round(port_ret * 100, 2),
-                cvar=round(cvar * 100, 4),
-                volatility=round(port_vol * 100, 2),
-                weights={t: round(float(wi), 6)
-                         for t, wi in zip(params.tickers, w)},
+                lambda_val=round(float(ra_value), 6),
+                expected_return=round(expected_return * 252 * 100, 2),
+                cvar=round(cvar_value * 100, 4),
+                volatility=round(float(volatility) * np.sqrt(252) * 100, 2),
+                weights=weights_dict,
             ))
-        except RuntimeError:
-            continue
+
+        except Exception as e:
+            logger.debug("Frontier point failed at ra=%.4f: %s", ra_value, e)
+            # Try fallback solver for this point
+            if solver_settings.get("solver") == cp.CUOPT:
+                try:
+                    fallback = {
+                        "solver": cp.CLARABEL, "verbose": False,
+                        "tol_gap_abs": 1e-4, "tol_gap_rel": 1e-4, "tol_feas": 1e-4,
+                    }
+                    result_row, portfolio = cvar_problem.solve_optimization_problem(
+                        solver_settings=fallback, print_results=False,
+                    )
+                    expected_return = float(result_row["return"])
+                    cvar_value = float(result_row["CVaR"])
+                    variance = portfolio.calculate_portfolio_variance(covariance)
+                    volatility = np.sqrt(variance)
+                    weights_dict = {
+                        t: round(float(w), 6)
+                        for t, w in zip(tickers, portfolio.weights)
+                    }
+                    points.append(FrontierPoint(
+                        lambda_val=round(float(ra_value), 6),
+                        expected_return=round(expected_return * 252 * 100, 2),
+                        cvar=round(cvar_value * 100, 4),
+                        volatility=round(float(volatility) * np.sqrt(252) * 100, 2),
+                        weights=weights_dict,
+                    ))
+                except Exception:
+                    continue
+            else:
+                continue
 
     return points
 
 
 def evaluate_custom_portfolio(
-    scenarios: np.ndarray,
-    mean_returns: np.ndarray,
+    returns_dict: dict,
     params: FrontierParams,
 ) -> CustomPortfolioEval | None:
     """Evaluate CVaR/return/vol for user-provided weights."""
     if not params.custom_portfolio:
         return None
 
-    N = len(params.tickers)
+    tickers = returns_dict["tickers"]
+    N = len(tickers)
     weights = np.zeros(N)
-    for i, t in enumerate(params.tickers):
+    for i, t in enumerate(tickers):
         weights[i] = params.custom_portfolio.get(t, 0.0)
 
-    # Normalise if they don't sum to 1
     wsum = weights.sum()
     if abs(wsum) < 1e-10:
         return None
     if abs(wsum - 1.0) > 1e-6:
         weights = weights / wsum
 
+    # Use cufolio's evaluate_portfolio_performance if cvar_data is available
+    cvar_data = returns_dict.get("cvar_data")
+    if cvar_data is not None:
+        scenarios = cvar_data.R.T  # (S, N)
+        mean_returns = cvar_data.mean
+    else:
+        returns_df = returns_dict["returns"]
+        scenarios = returns_df.values
+        mean_returns = returns_dict["mean"]
+
     port_ret = float(mean_returns @ weights) * 252
     port_vol = float(np.std(scenarios @ weights, ddof=1) * np.sqrt(252))
 
-    # CVaR
     beta = params.confidence_level
     port_scen = scenarios @ weights
     var_threshold = np.percentile(port_scen, (1 - beta) * 100)
@@ -156,7 +227,7 @@ def evaluate_custom_portfolio(
         cvar=round(cvar * 100, 4),
         volatility=round(port_vol * 100, 2),
         sharpe=round(sharpe, 4),
-        weights={t: round(float(w), 6) for t, w in zip(params.tickers, weights)},
+        weights={t: round(float(w), 6) for t, w in zip(tickers, weights)},
     )
 
 
@@ -174,7 +245,7 @@ def export_frontier_csv(points: list[FrontierPoint], tickers: list[str]) -> str:
 
 
 def run_frontier_analysis(params: FrontierParams) -> FrontierResult:
-    """Full frontier pipeline."""
+    """Full frontier pipeline using cufolio."""
     if len(params.tickers) < 2:
         raise ValueError("종목을 2개 이상 입력해주세요.")
     if not (0.90 <= params.confidence_level <= 0.99):
@@ -189,20 +260,23 @@ def run_frontier_analysis(params: FrontierParams) -> FrontierResult:
     if missing:
         raise ValueError(f"데이터를 찾을 수 없는 종목: {', '.join(sorted(missing))}")
 
-    rt = ReturnType(params.return_type)
-    returns = compute_returns(prices, rt)
-    if len(returns) < 30:
-        raise ValueError(f"데이터 부족: {len(returns)}일 (최소 30일 필요).")
-
-    sm = ScenarioMethod(params.scenario_method)
-    scenarios = generate_scenarios(
-        returns, sm, params.num_scenarios,
-        params.kde_bandwidth, params.kde_kernel,
+    rt = "LOG" if params.return_type == "log" else "NORMAL"
+    returns_dict = _build_returns_dict(
+        prices, return_type=rt,
+        regime_name="frontier",
+        start_date=params.start_date,
+        end_date=params.end_date,
     )
-    mean_ret = returns.mean().values
+
+    returns_df = returns_dict["returns"]
+    if len(returns_df) < 30:
+        raise ValueError(f"데이터 부족: {len(returns_df)}일 (최소 30일 필요).")
+
+    # Generate scenarios
+    returns_dict = _generate_scenarios(returns_dict, params)
 
     # Frontier
-    points = compute_logarithmic_frontier(scenarios, mean_ret, params)
+    points = compute_logarithmic_frontier(returns_dict, params)
     if not points:
         raise RuntimeError("프론티어 계산에 실패했습니다.")
 
@@ -217,7 +291,14 @@ def run_frontier_analysis(params: FrontierParams) -> FrontierResult:
             best_idx = i
 
     # Custom portfolio evaluation
-    custom_eval = evaluate_custom_portfolio(scenarios, mean_ret, params)
+    custom_eval = evaluate_custom_portfolio(returns_dict, params)
+
+    # Get scenarios for charts
+    cvar_data = returns_dict.get("cvar_data")
+    if cvar_data is not None:
+        scenarios = cvar_data.R.T
+    else:
+        scenarios = returns_df.values
 
     return FrontierResult(
         points=points,
@@ -225,6 +306,6 @@ def run_frontier_analysis(params: FrontierParams) -> FrontierResult:
         custom_eval=custom_eval,
         tickers=params.tickers,
         prices_df=prices,
-        returns_df=returns,
+        returns_df=returns_df,
         scenarios=scenarios,
     )

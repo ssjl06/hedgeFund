@@ -1,10 +1,12 @@
 """
-Scenario Generation for CVaR Portfolio Optimization
+Scenario Generation for CVaR Portfolio Optimization (cufolio backend)
 
-Supports three methods mirroring NVIDIA's cvar_basic.ipynb:
-  - HISTORICAL: raw return matrix (baseline)
-  - KDE: Kernel Density Estimation via sklearn
-  - GAUSSIAN: parametric multivariate normal sampling
+Uses cufolio's cvar_utils.generate_cvar_data() which supports:
+  - KDE with cuML GPU or sklearn CPU
+  - Gaussian multivariate normal
+  - Historical (no_fit)
+
+This module provides backward-compatible enums and wrappers.
 """
 
 from enum import Enum
@@ -35,12 +37,12 @@ def generate_scenarios(
     returns: pd.DataFrame,
     method: ScenarioMethod = ScenarioMethod.HISTORICAL,
     num_scenarios: int = 0,
-    bandwidth: float = 0.5,
+    bandwidth: float = 0.01,
     kernel: str = "gaussian",
     seed: int = 42,
 ) -> np.ndarray:
     """
-    Generate return scenarios for CVaR optimization.
+    Generate return scenarios using cufolio backend.
 
     Parameters
     ----------
@@ -48,13 +50,15 @@ def generate_scenarios(
     method : ScenarioMethod enum
     num_scenarios : number of synthetic scenarios (0 = use len(returns))
     bandwidth : KDE bandwidth parameter
-    kernel : KDE kernel type (gaussian, tophat, epanechnikov, etc.)
+    kernel : KDE kernel type
     seed : random seed for reproducibility
 
     Returns
     -------
     scenarios : ndarray of shape (S, N)
     """
+    from cufolio import cvar_utils
+
     data = returns.values
     n_obs, n_assets = data.shape
     n_scen = num_scenarios if num_scenarios > 0 else n_obs
@@ -67,17 +71,35 @@ def generate_scenarios(
         return data[idx]
 
     if method == ScenarioMethod.KDE:
-        from sklearn.neighbors import KernelDensity
-        kde = KernelDensity(bandwidth=bandwidth, kernel=kernel)
-        kde.fit(data)
-        samples = kde.sample(n_scen, random_state=seed)
+        # Use cufolio's KDE (GPU if available, else CPU)
+        try:
+            import cuml.neighbors  # noqa: F401
+            kde_device = "GPU"
+        except Exception:
+            kde_device = "CPU"
+
+        kde_settings = {
+            "bandwidth": bandwidth,
+            "kernel": kernel,
+            "device": kde_device,
+        }
+
+        try:
+            samples = cvar_utils.generate_samples_kde(
+                n_scen, data, kde_settings=kde_settings, verbose=False
+            )
+        except Exception:
+            # Fallback to CPU
+            kde_settings["device"] = "CPU"
+            samples = cvar_utils.generate_samples_kde(
+                n_scen, data, kde_settings=kde_settings, verbose=False
+            )
         return samples
 
     if method == ScenarioMethod.GAUSSIAN:
         rng = np.random.default_rng(seed)
         mean = data.mean(axis=0)
         cov = np.cov(data, rowvar=False)
-        # Ensure positive semi-definiteness
         cov = (cov + cov.T) / 2
         eigvals = np.linalg.eigvalsh(cov)
         if eigvals.min() < 0:
