@@ -84,11 +84,17 @@ def backtest_split_chart(result: AdvancedOptimizationResult) -> dict:
 
     # Train/test split line
     if bt.split_date:
-        fig.add_vline(
-            x=bt.split_date,
-            line_dash="dot", line_color="gray", line_width=2,
-            annotation_text="Train/Test 분할",
-            annotation_position="top left",
+        fig.add_shape(
+            type="line",
+            x0=bt.split_date, x1=bt.split_date,
+            y0=0, y1=1, yref="paper",
+            line=dict(dash="dot", color="gray", width=2),
+        )
+        fig.add_annotation(
+            x=bt.split_date, y=1, yref="paper",
+            text="Train/Test 분할", showarrow=False,
+            xanchor="left", yanchor="top",
+            font=dict(size=11, color="gray"),
         )
 
     fig.update_layout(

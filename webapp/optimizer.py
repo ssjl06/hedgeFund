@@ -677,12 +677,12 @@ def backtest_advanced(
     split_date = params.test_split_date
     if split_date:
         split_dt = pd.Timestamp(split_date)
-        train_mask = returns.index < split_dt
-        test_mask = returns.index >= split_dt
+        train_mask = np.array(returns.index < split_dt)
+        test_mask = np.array(returns.index >= split_dt)
 
         if train_mask.sum() > 5 and test_mask.sum() > 5:
-            train_ret = port_daily[train_mask.values]
-            test_ret = port_daily[test_mask.values]
+            train_ret = port_daily[train_mask]
+            test_ret = port_daily[test_mask]
 
             train_vol = float(np.std(train_ret, ddof=1) * np.sqrt(252))
             train_ann = float(np.mean(train_ret) * 252)
