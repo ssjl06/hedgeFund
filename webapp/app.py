@@ -283,6 +283,13 @@ def api_optimize_advanced():
             benchmark_portfolios=benchmark_portfolios,
         )
 
+        logger.info(
+            "optimize-advanced: tickers=%s, scenarios=%s/%s, max_assets=%s, "
+            "return_type=%s, risk_aversion=%s",
+            tickers, num_scenarios, scenario_method, max_assets,
+            return_type, risk_aversion,
+        )
+
         result = run_advanced_optimization(params)
         charts = generate_advanced_charts(result)
         bt = result.backtest
