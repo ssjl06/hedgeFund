@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CVaR 포트폴리오 최적화</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/plotly.js@2.32/dist/plotly.min.js"></script>
+    <style>
+        body { background: #f5f7fa; }
+        .hero { background: linear-gradient(135deg, #1a237e 0%, #0d47a1 50%, #01579b 100%); color: white; padding: 2.5rem 0; }
+        .hero h1 { font-weight: 700; }
+        .card { border: none; box-shadow: 0 2px 12px rgba(0,0,0,0.08); border-radius: 12px; }
+        .card-header { border-radius: 12px 12px 0 0 !important; font-weight: 600; }
+        .nav-pills .nav-link.active { background: #1a237e; }
+        .nav-pills .nav-link { color: #1a237e; font-weight: 500; }
+        .form-label { font-weight: 500; font-size: 0.9rem; }
+        .btn-primary { background: #1a237e; border-color: #1a237e; }
+        .btn-primary:hover { background: #283593; border-color: #283593; }
+        .spinner-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 9999; display: none; justify-content: center; align-items: center; }
+        .spinner-overlay.active { display: flex; }
+        .metric-card { background: white; border-radius: 10px; padding: 1rem; text-align: center; box-shadow: 0 1px 6px rgba(0,0,0,0.06); }
+        .metric-card .value { font-size: 1.4rem; font-weight: 700; color: #1a237e; }
+        .metric-card .label { font-size: 0.8rem; color: #666; }
+        .theory-section { background: white; border-radius: 12px; padding: 2rem; margin-bottom: 2rem; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+        .theory-section h3 { color: #1a237e; }
+        .math-block { background: #f8f9fa; padding: 1rem; border-radius: 8px; overflow-x: auto; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.9rem; }
+        table.result-table { font-size: 0.85rem; }
+        .result-table th { background: #e8eaf6; }
+        #results-section, #frontier-results-section { display: none; }
+    </style>
+</head>
+<body>
+    <!-- Spinner -->
+    <div class="spinner-overlay" id="spinner">
+        <div class="text-center text-white">
+            <div class="spinner-border" style="width: 3rem; height: 3rem;" role="status"></div>
+            <p class="mt-3 fs-5" id="spinner-text">최적화 실행 중...</p>
+        </div>
+    </div>
+
+    <!-- Hero -->
+    <div class="hero">
+        <div class="container">
+            <h1>CVaR 포트폴리오 최적화</h1>
+            <p class="lead mb-0">NVIDIA cufolio 기반 Mean-CVaR 모델을 사용한 포트폴리오 자산 배분 최적화</p>
+            {% if has_gpu %}<span class="badge bg-success">GPU 가속 활성화</span>{% else %}<span class="badge bg-secondary">CPU 모드</span>{% endif %}
+        </div>
+    </div>
+
+    <div class="container my-4">
+        <!-- Navigation Tabs -->
+        <ul class="nav nav-pills mb-4" id="mainTab" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link active" id="optimize-tab" data-bs-toggle="pill" data-bs-target="#optimize-pane" type="button">CVaR 최적화</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="frontier-tab" data-bs-toggle="pill" data-bs-target="#frontier-pane" type="button">효율적 프론티어</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="theory-tab" data-bs-toggle="pill" data-bs-target="#theory-pane" type="button">CVaR 이론 소개</button>
+            </li>
+        </ul>
+
+        <div class="tab-content">
+            <!-- ========== CVaR Optimization Tab ========== -->
+            <div class="tab-pane fade show active" id="optimize-pane" role="tabpanel">
+                <div class="row">
+                    <div class="col-lg-4">
+                        <div class="card mb-4">
+                            <div class="card-header bg-primary text-white">최적화 파라미터 설정</div>
+                            <div class="card-body">
+                                <form id="optimize-form">
+                                    <h6 class="text-muted mb-2">데이터 기간</h6>
+                                    <div class="row g-2 mb-3">
+                                        <div class="col-6">
+                                            <label class="form-label">시작일</label>
+                                            <input type="date" class="form-control form-control-sm" name="start_date" value="2021-01-01">
+                                        </div>
+                                        <div class="col-6">
+                                            <label class="form-label">종료일</label>
+                                            <input type="date" class="form-control form-control-sm" name="end_date" value="2024-01-01">
+                                        </div>
+                                    </div>
+
+                                    <h6 class="text-muted mb-2">CVaR 파라미터</h6>
+                                    <div class="mb-2">
+                                        <label class="form-label">신뢰 수준 (alpha) <span class="text-muted">0.90~0.99</span></label>
+                                        <input type="number" class="form-control form-control-sm" name="confidence" value="0.95" min="0.90" max="0.99" step="0.01">
+                                    </div>
+                                    <div class="mb-2">
+                                        <label class="form-label">위험 회피 계수 (lambda) <span class="text-muted">높을수록 안전</span></label>
+                                        <input type="number" class="form-control form-control-sm" name="risk_aversion" value="1" min="0" max="100" step="0.1">
+                                    </div>
+
+                                    <h6 class="text-muted mb-2 mt-3">가중치 제약</h6>
+                                    <div class="row g-2 mb-2">
+                                        <div class="col-6">
+                                            <label class="form-label">최소 가중치 (w_min)</label>
+                                            <input type="number" class="form-control form-control-sm" name="w_min" value="-0.3" step="0.05">
+                                        </div>
+                                        <div class="col-6">
+                                            <label class="form-label">최대 가중치 (w_max)</label>
+                                            <input type="number" class="form-control form-control-sm" name="w_max" value="0.4" step="0.05">
+                                        </div>
+                                    </div>
+                                    <div class="row g-2 mb-2">
+                                        <div class="col-6">
+                                            <label class="form-label">최소 현금 (c_min)</label>
+                                            <input type="number" class="form-control form-control-sm" name="c_min" value="0.0" step="0.05">
+                                        </div>
+                                        <div class="col-6">
+                                            <label class="form-label">최대 현금 (c_max)</label>
+                                            <input type="number" class="form-control form-control-sm" name="c_max" value="0.2" step="0.05">
+                                        </div>
+                                    </div>
+
+                                    <h6 class="text-muted mb-2 mt-3">추가 제약</h6>
+                                    <div class="mb-2">
+                                        <label class="form-label">레버리지 한도 (L_tar)</label>
+                                        <input type="number" class="form-control form-control-sm" name="L_tar" value="1.6" step="0.1" min="1.0">
+                                    </div>
+                                    <div class="mb-2">
+                                        <label class="form-label">카디널리티 (최대 보유 종목 수, 비워두면 무제한)</label>
+                                        <input type="number" class="form-control form-control-sm" name="cardinality" value="" placeholder="예: 10">
+                                    </div>
+
+                                    <h6 class="text-muted mb-2 mt-3">시나리오 생성</h6>
+                                    <div class="row g-2 mb-2">
+                                        <div class="col-6">
+                                            <label class="form-label">시나리오 수</label>
+                                            <input type="number" class="form-control form-control-sm" name="num_scen" value="10000" step="1000">
+                                        </div>
+                                        <div class="col-6">
+                                            <label class="form-label">생성 방법</label>
+                                            <select class="form-select form-select-sm" name="fit_type">
+                                                <option value="gaussian">Gaussian</option>
+                                                <option value="kde">KDE</option>
+                                                <option value="no_fit">Historical</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label class="form-label">수익률 유형</label>
+                                        <select class="form-select form-select-sm" name="return_type">
+                                            <option value="LOG">로그 수익률</option>
+                                            <option value="NORMAL">단순 수익률</option>
+                                        </select>
+                                    </div>
+
+                                    <h6 class="text-muted mb-2">백테스트 기간</h6>
+                                    <div class="row g-2 mb-3">
+                                        <div class="col-6">
+                                            <label class="form-label">테스트 시작</label>
+                                            <input type="date" class="form-control form-control-sm" name="test_start" value="2023-09-01">
+                                        </div>
+                                        <div class="col-6">
+                                            <label class="form-label">테스트 종료</label>
+                                            <input type="date" class="form-control form-control-sm" name="test_end" value="2024-07-01">
+                                        </div>
+                                    </div>
+
+                                    <button type="submit" class="btn btn-primary w-100">최적화 실행</button>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-lg-8">
+                        <!-- Results Section -->
+                        <div id="results-section">
+                            <div class="row g-3 mb-3" id="metrics-row"></div>
+                            <div class="card mb-3">
+                                <div class="card-header bg-light">포트폴리오 배분</div>
+                                <div class="card-body">
+                                    <div id="portfolio-chart"></div>
+                                </div>
+                            </div>
+                            <div class="card mb-3">
+                                <div class="card-header bg-light">자산 배분 상세</div>
+                                <div class="card-body" style="max-height: 400px; overflow-y: auto;">
+                                    <table class="table table-sm table-striped result-table" id="allocation-table">
+                                        <thead><tr><th>티커</th><th>가중치</th><th>비율 (%)</th><th>포지션</th></tr></thead>
+                                        <tbody></tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            <div class="card mb-3">
+                                <div class="card-header bg-light">백테스트 결과</div>
+                                <div class="card-body">
+                                    <div id="backtest-chart"></div>
+                                    <div id="backtest-metrics" class="mt-2"></div>
+                                </div>
+                            </div>
+                            <div class="card mb-3">
+                                <div class="card-header bg-light">결과 해석</div>
+                                <div class="card-body" id="interpretation"></div>
+                            </div>
+                        </div>
+                        <div id="no-results" class="text-center text-muted py-5">
+                            <p class="fs-5">왼쪽 파라미터를 설정하고 "최적화 실행" 버튼을 클릭하세요.</p>
+                            <p>S&P 500 데이터 기반으로 Mean-CVaR 포트폴리오 최적화를 수행합니다.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ========== Efficient Frontier Tab ========== -->
+            <div class="tab-pane fade" id="frontier-pane" role="tabpanel">
+                <div class="row">
+                    <div class="col-lg-4">
+                        <div class="card mb-4">
+                            <div class="card-header bg-primary text-white">효율적 프론티어 설정</div>
+                            <div class="card-body">
+                                <form id="frontier-form">
+                                    <h6 class="text-muted mb-2">데이터 기간</h6>
+                                    <div class="row g-2 mb-3">
+                                        <div class="col-6">
+                                            <label class="form-label">시작일</label>
+                                            <input type="date" class="form-control form-control-sm" name="start_date" value="2022-01-01">
+                                        </div>
+                                        <div class="col-6">
+                                            <label class="form-label">종료일</label>
+                                            <input type="date" class="form-control form-control-sm" name="end_date" value="2024-07-01">
+                                        </div>
+                                    </div>
+
+                                    <h6 class="text-muted mb-2">프론티어 파라미터</h6>
+                                    <div class="mb-2">
+                                        <label class="form-label">신뢰 수준 (alpha)</label>
+                                        <input type="number" class="form-control form-control-sm" name="confidence" value="0.95" min="0.90" max="0.99" step="0.01">
+                                    </div>
+                                    <div class="row g-2 mb-2">
+                                        <div class="col-6">
+                                            <label class="form-label">최소 가중치</label>
+                                            <input type="number" class="form-control form-control-sm" name="w_min" value="0.0" step="0.05">
+                                        </div>
+                                        <div class="col-6">
+                                            <label class="form-label">최대 가중치</label>
+                                            <input type="number" class="form-control form-control-sm" name="w_max" value="1.0" step="0.05">
+                                        </div>
+                                    </div>
+                                    <div class="mb-2">
+                                        <label class="form-label">레버리지 한도</label>
+                                        <input type="number" class="form-control form-control-sm" name="L_tar" value="1.0" step="0.1" min="1.0">
+                                    </div>
+
+                                    <h6 class="text-muted mb-2 mt-3">위험 회피 스윕</h6>
+                                    <div class="row g-2 mb-2">
+                                        <div class="col-4">
+                                            <label class="form-label">최소 (10^x)</label>
+                                            <input type="number" class="form-control form-control-sm" name="min_ra_exp" value="-3" step="0.5">
+                                        </div>
+                                        <div class="col-4">
+                                            <label class="form-label">최대 (10^x)</label>
+                                            <input type="number" class="form-control form-control-sm" name="max_ra_exp" value="1" step="0.5">
+                                        </div>
+                                        <div class="col-4">
+                                            <label class="form-label">단계 수</label>
+                                            <input type="number" class="form-control form-control-sm" name="ra_steps" value="30" min="5" max="100">
+                                        </div>
+                                    </div>
+
+                                    <h6 class="text-muted mb-2 mt-3">시나리오 생성</h6>
+                                    <div class="row g-2 mb-3">
+                                        <div class="col-6">
+                                            <label class="form-label">시나리오 수</label>
+                                            <input type="number" class="form-control form-control-sm" name="num_scen" value="10000" step="1000">
+                                        </div>
+                                        <div class="col-6">
+                                            <label class="form-label">생성 방법</label>
+                                            <select class="form-select form-select-sm" name="fit_type">
+                                                <option value="gaussian">Gaussian</option>
+                                                <option value="kde">KDE</option>
+                                            </select>
+                                        </div>
+                                    </div>
+
+                                    <h6 class="text-muted mb-2">비교 포트폴리오 (선택)</h6>
+                                    <div id="custom-portfolios">
+                                        <div class="input-group input-group-sm mb-2">
+                                            <input type="text" class="form-control" placeholder="이름 (예: AAPL-MSFT)" id="cp-name">
+                                            <input type="text" class="form-control" placeholder="가중치 (예: AAPL:0.3,MSFT:0.7)" id="cp-weights">
+                                            <button type="button" class="btn btn-outline-primary" onclick="addCustomPortfolio()">추가</button>
+                                        </div>
+                                        <div id="cp-list" class="small"></div>
+                                    </div>
+
+                                    <button type="submit" class="btn btn-primary w-100 mt-3">프론티어 생성</button>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-lg-8">
+                        <div id="frontier-results-section">
+                            <div class="card mb-3">
+                                <div class="card-header bg-light">효율적 프론티어 차트</div>
+                                <div class="card-body">
+                                    <div id="frontier-chart"></div>
+                                </div>
+                            </div>
+                            <div class="row g-3 mb-3" id="frontier-metrics-row"></div>
+                            <div class="card mb-3">
+                                <div class="card-header bg-light">프론티어 데이터</div>
+                                <div class="card-body" style="max-height: 400px; overflow-y: auto;">
+                                    <table class="table table-sm table-striped result-table" id="frontier-table">
+                                        <thead><tr>
+                                            <th>#</th><th>위험 회피 (lambda)</th><th>기대 수익률</th>
+                                            <th>CVaR</th><th>목적함수</th><th>Sharpe</th><th>변동성</th>
+                                        </tr></thead>
+                                        <tbody></tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            <div class="card mb-3">
+                                <div class="card-header bg-light">결과 해석</div>
+                                <div class="card-body" id="frontier-interpretation"></div>
+                            </div>
+                        </div>
+                        <div id="no-frontier-results" class="text-center text-muted py-5">
+                            <p class="fs-5">파라미터를 설정하고 "프론티어 생성" 버튼을 클릭하세요.</p>
+                            <p>다양한 위험 회피 수준에서의 최적 포트폴리오를 탐색합니다.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ========== Theory Tab ========== -->
+            <div class="tab-pane fade" id="theory-pane" role="tabpanel">
+                <div class="theory-section">
+                    <h3>CVaR (조건부 위험가치) 포트폴리오 최적화란?</h3>
+                    <hr>
+
+                    <h5>1. VaR과 CVaR의 개념</h5>
+                    <p><strong>VaR (Value at Risk, 위험가치)</strong>는 특정 신뢰 수준에서 발생할 수 있는 최대 손실을 나타냅니다. 예를 들어, 95% VaR이 2%라면 "95%의 확률로 하루 손실이 2% 이내"라는 의미입니다.</p>
+                    <p><strong>CVaR (Conditional Value at Risk, 조건부 위험가치)</strong>은 VaR을 초과하는 손실의 평균입니다. 즉, 최악의 시나리오에서 예상되는 평균 손실을 측정합니다.</p>
+                    <div class="math-block">
+                        CVaR_alpha = E[Loss | Loss >= VaR_alpha]
+                        <br><br>
+                        여기서 alpha는 신뢰 수준 (보통 0.95)
+                    </div>
+                    <div class="alert alert-info">
+                        <strong>왜 CVaR인가?</strong> CVaR은 VaR과 달리 "꼬리 위험(tail risk)"을 정확히 포착하며, 수학적으로 일관된 위험 측도(coherent risk measure)입니다. Basel III 시장 리스크 규정에서도 VaR 대신 CVaR을 채택했습니다.
+                    </div>
+
+                    <h5 class="mt-4">2. Mean-CVaR 최적화 모델</h5>
+                    <p>기대 수익률을 최대화하면서 CVaR(위험)을 최소화하는 포트폴리오를 찾습니다:</p>
+                    <div class="math-block">
+                        최대화:  mu^T * w  -  lambda * CVaR(w)
+                        <br><br>
+                        여기서:
+                        <br>  w = 자산별 투자 가중치 벡터
+                        <br>  mu = 자산별 기대 수익률 벡터
+                        <br>  lambda = 위험 회피 계수 (클수록 안전한 포트폴리오)
+                    </div>
+
+                    <h5 class="mt-4">3. Rockafellar-Uryasev 선형 변환</h5>
+                    <p>CVaR 최적화는 다음과 같은 선형 프로그래밍(LP) 문제로 변환됩니다:</p>
+                    <div class="math-block">
+                        최대화:  mu^T * w  -  lambda * [t + 1/(1-alpha) * p^T * u]
+                        <br><br>
+                        제약 조건:
+                        <br>  u + t >= -R^T * w    (CVaR 시나리오 제약)
+                        <br>  u >= 0               (비음수 조건)
+                        <br>  sum(w) + cash = 1    (자기금융 조건)
+                        <br>  w_min <= w <= w_max  (가중치 상하한)
+                        <br>  ||w||_1 <= L_tar     (레버리지 제한)
+                    </div>
+
+                    <h5 class="mt-4">4. 주요 파라미터 설명</h5>
+                    <table class="table table-bordered">
+                        <thead class="table-light">
+                            <tr><th>파라미터</th><th>기호</th><th>설명</th><th>예시</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td>신뢰 수준</td><td>alpha</td><td>CVaR 계산의 신뢰 수준. 높을수록 극단적 손실에 민감</td><td>0.95 (95%)</td></tr>
+                            <tr><td>위험 회피 계수</td><td>lambda</td><td>수익 vs 위험의 트레이드오프. 높을수록 안전한 포트폴리오</td><td>1.0</td></tr>
+                            <tr><td>가중치 하한</td><td>w_min</td><td>각 자산의 최소 투자 비중. 음수면 공매도 허용</td><td>-0.3 (30% 숏 허용)</td></tr>
+                            <tr><td>가중치 상한</td><td>w_max</td><td>각 자산의 최대 투자 비중. 집중 위험 방지</td><td>0.4 (40% 상한)</td></tr>
+                            <tr><td>현금 비중</td><td>c_min, c_max</td><td>현금 보유 비중의 범위</td><td>0.0 ~ 0.2</td></tr>
+                            <tr><td>레버리지</td><td>L_tar</td><td>총 투자 노출도 한도 (long + |short|)</td><td>1.6 (160%)</td></tr>
+                            <tr><td>카디널리티</td><td>K</td><td>포트폴리오에 포함할 최대 종목 수. MILP로 변환</td><td>10</td></tr>
+                            <tr><td>시나리오 수</td><td>S</td><td>수익률 시뮬레이션 시나리오 개수. 많을수록 정확</td><td>10,000</td></tr>
+                        </tbody>
+                    </table>
+
+                    <h5 class="mt-4">5. 시나리오 생성 방법</h5>
+                    <div class="row">
+                        <div class="col-md-4">
+                            <div class="card">
+                                <div class="card-body">
+                                    <h6>Historical (역사적)</h6>
+                                    <p class="small">과거 수익률 데이터를 그대로 시나리오로 사용합니다. 가장 단순하지만 과거 패턴에 의존합니다.</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="card">
+                                <div class="card-body">
+                                    <h6>KDE (커널 밀도 추정)</h6>
+                                    <p class="small">비모수적 밀도 추정으로 수익률 분포를 모델링합니다. GPU 가속 가능(cuML). 비정규 분포에 강합니다.</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="card">
+                                <div class="card-body">
+                                    <h6>Gaussian (가우시안)</h6>
+                                    <p class="small">다변량 정규분포를 가정하여 시나리오를 생성합니다. 빠르고 안정적이나 꼬리 위험을 과소평가할 수 있습니다.</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <h5 class="mt-4">6. 효율적 프론티어란?</h5>
+                    <p>효율적 프론티어는 주어진 위험 수준에서 달성 가능한 최대 기대 수익률의 곡선입니다. 위험 회피 계수(lambda)를 변화시키면서 최적화를 반복 수행하여 구성합니다.</p>
+                    <ul>
+                        <li><strong>탄젠트 포트폴리오</strong>: Sharpe 비율이 가장 높은 점으로, 위험 대비 수익이 최적인 포트폴리오입니다.</li>
+                        <li><strong>최소 분산 포트폴리오</strong>: 프론티어의 가장 왼쪽 점으로, 위험이 가장 낮은 포트폴리오입니다.</li>
+                        <li>프론티어 아래의 포트폴리오는 동일 위험에서 더 낮은 수익을 제공하므로 비효율적입니다.</li>
+                    </ul>
+
+                    <h5 class="mt-4">7. 백테스트 성과 지표</h5>
+                    <table class="table table-bordered">
+                        <thead class="table-light">
+                            <tr><th>지표</th><th>설명</th><th>해석</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td>Sharpe Ratio</td><td>초과 수익률 / 변동성 (연환산)</td><td>높을수록 좋음. 1 이상이면 양호</td></tr>
+                            <tr><td>Sortino Ratio</td><td>초과 수익률 / 하방 변동성 (연환산)</td><td>하락 위험만 고려. 높을수록 좋음</td></tr>
+                            <tr><td>Maximum Drawdown</td><td>최고점 대비 최대 하락폭</td><td>작을수록 좋음. 위험 관리 능력 반영</td></tr>
+                        </tbody>
+                    </table>
+
+                    <h5 class="mt-4">8. 사용 가이드</h5>
+                    <ol>
+                        <li><strong>CVaR 최적화 탭</strong>에서 파라미터를 설정하고 실행하면, 최적 포트폴리오와 백테스트 결과를 확인할 수 있습니다.</li>
+                        <li><strong>효율적 프론티어 탭</strong>에서 위험-수익 트레이드오프 곡선을 생성하고, 사용자 포트폴리오와 비교할 수 있습니다.</li>
+                        <li>위험 회피 계수를 낮추면 수익 중심, 높이면 안전 중심 포트폴리오가 됩니다.</li>
+                        <li>공매도를 허용하려면 w_min을 음수로 설정하세요.</li>
+                        <li>카디널리티 제약을 추가하면 종목 수를 제한하지만 MILP 문제로 변환되어 풀이 시간이 길어질 수 있습니다.</li>
+                    </ol>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <footer class="text-center text-muted py-4">
+        <small>CVaR Portfolio Optimizer - Powered by NVIDIA cufolio | Mean-CVaR Model (Rockafellar & Uryasev, 2000)</small>
+    </footer>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        const customPortfolios = {};
+
+        function addCustomPortfolio() {
+            const name = document.getElementById('cp-name').value.trim();
+            const weightsStr = document.getElementById('cp-weights').value.trim();
+            if (!name || !weightsStr) return;
+
+            const weights = {};
+            weightsStr.split(',').forEach(pair => {
+                const [ticker, w] = pair.split(':');
+                if (ticker && w) weights[ticker.trim()] = parseFloat(w.trim());
+            });
+
+            customPortfolios[name] = { weights, cash: 0.0 };
+
+            const list = document.getElementById('cp-list');
+            const badge = document.createElement('span');
+            badge.className = 'badge bg-secondary me-1 mb-1';
+            badge.textContent = `${name}: ${weightsStr}`;
+            badge.style.cursor = 'pointer';
+            badge.title = '클릭하여 삭제';
+            badge.onclick = function() { delete customPortfolios[name]; badge.remove(); };
+            list.appendChild(badge);
+
+            document.getElementById('cp-name').value = '';
+            document.getElementById('cp-weights').value = '';
+        }
+
+        function showSpinner(text) {
+            document.getElementById('spinner-text').textContent = text;
+            document.getElementById('spinner').classList.add('active');
+        }
+        function hideSpinner() {
+            document.getElementById('spinner').classList.remove('active');
+        }
+
+        function getFormData(form) {
+            const fd = new FormData(form);
+            const data = {};
+            for (const [key, value] of fd.entries()) {
+                data[key] = value;
+            }
+            return data;
+        }
+
+        function renderMetrics(metrics, containerId) {
+            const container = document.getElementById(containerId);
+            container.innerHTML = '';
+            const items = [
+                { label: '기대 수익률', value: (metrics.expected_return * 100).toFixed(4) + '%', color: '#1565c0' },
+                { label: 'CVaR (95%)', value: (metrics.cvar * 100).toFixed(4) + '%', color: '#c62828' },
+                { label: '목적함수', value: metrics.objective.toFixed(6), color: '#2e7d32' },
+                { label: '보유 종목 수', value: metrics.num_assets, color: '#6a1b9a' },
+                { label: '현금 비중', value: (metrics.cash * 100).toFixed(1) + '%', color: '#ef6c00' },
+                { label: '소요 시간', value: metrics.total_elapsed + '초', color: '#455a64' },
+            ];
+            items.forEach(item => {
+                const col = document.createElement('div');
+                col.className = 'col-md-2 col-sm-4';
+                col.innerHTML = `<div class="metric-card"><div class="value" style="color:${item.color}">${item.value}</div><div class="label">${item.label}</div></div>`;
+                container.appendChild(col);
+            });
+        }
+
+        function generateInterpretation(results) {
+            let html = '<div class="small">';
+            const ret = results.expected_return;
+            const cvar = results.cvar;
+            const ratio = ret / cvar;
+            html += `<p><strong>수익/위험 비율:</strong> ${ratio.toFixed(4)} - `;
+            if (ratio > 0.1) html += '기대 수익률이 위험 대비 양호한 수준입니다.</p>';
+            else if (ratio > 0.05) html += '기대 수익률이 위험 대비 보통 수준입니다.</p>';
+            else html += '위험 대비 기대 수익률이 낮습니다. 파라미터 조정을 고려하세요.</p>';
+
+            html += `<p><strong>포트폴리오 구성:</strong> 총 ${results.num_assets}개 종목에 투자하며, 현금 ${(results.cash*100).toFixed(1)}%를 보유합니다. `;
+            if (results.cash > 0.1) html += '상당한 현금 비중은 방어적 전략을 나타냅니다.</p>';
+            else html += '</p>';
+
+            html += `<p><strong>CVaR 해석:</strong> 95% 신뢰 수준에서 일일 예상 최대 손실은 약 ${(cvar*100).toFixed(2)}%입니다. `;
+            html += `연환산 기준 약 ${(cvar*Math.sqrt(252)*100).toFixed(1)}%의 CVaR에 해당합니다.</p>`;
+            html += '</div>';
+            return html;
+        }
+
+        // CVaR Optimization
+        document.getElementById('optimize-form').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            showSpinner('CVaR 최적화 실행 중... (CPU 기준 약 1~2분 소요)');
+
+            const data = getFormData(this);
+            try {
+                const resp = await fetch('/api/optimize', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                const result = await resp.json();
+
+                if (!result.success) {
+                    alert('오류: ' + result.error);
+                    hideSpinner();
+                    return;
+                }
+
+                document.getElementById('no-results').style.display = 'none';
+                document.getElementById('results-section').style.display = 'block';
+
+                renderMetrics(result.results, 'metrics-row');
+                Plotly.newPlot('portfolio-chart', result.portfolio_chart.data, result.portfolio_chart.layout, {responsive: true});
+
+                // Allocation table
+                const tbody = document.querySelector('#allocation-table tbody');
+                tbody.innerHTML = '';
+                result.allocation.forEach(row => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `<td><strong>${row.ticker}</strong></td><td>${row.weight.toFixed(4)}</td><td>${row.pct.toFixed(2)}%</td><td><span class="badge ${row.position === '롱' ? 'bg-primary' : 'bg-danger'}">${row.position}</span></td>`;
+                    tbody.appendChild(tr);
+                });
+
+                // Backtest
+                if (result.backtest_chart) {
+                    Plotly.newPlot('backtest-chart', result.backtest_chart.data, result.backtest_chart.layout, {responsive: true});
+                }
+                if (result.backtest_metrics) {
+                    const bm = result.backtest_metrics;
+                    let bmHtml = '<div class="row g-2">';
+                    Object.entries(bm).forEach(([k, v]) => {
+                        bmHtml += `<div class="col-auto"><span class="badge bg-light text-dark border">${k}: ${typeof v === 'number' ? v.toFixed(4) : v}</span></div>`;
+                    });
+                    bmHtml += '</div>';
+                    document.getElementById('backtest-metrics').innerHTML = bmHtml;
+                }
+
+                document.getElementById('interpretation').innerHTML = generateInterpretation(result.results);
+            } catch (err) {
+                alert('요청 실패: ' + err.message);
+            }
+            hideSpinner();
+        });
+
+        // Efficient Frontier
+        document.getElementById('frontier-form').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            showSpinner('효율적 프론티어 생성 중... (여러 번의 최적화 수행)');
+
+            const data = getFormData(this);
+            data.custom_portfolios = customPortfolios;
+
+            try {
+                const resp = await fetch('/api/frontier', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                const result = await resp.json();
+
+                if (!result.success) {
+                    alert('오류: ' + result.error);
+                    hideSpinner();
+                    return;
+                }
+
+                document.getElementById('no-frontier-results').style.display = 'none';
+                document.getElementById('frontier-results-section').style.display = 'block';
+
+                Plotly.newPlot('frontier-chart', result.frontier_chart.data, result.frontier_chart.layout, {responsive: true});
+
+                // Metrics row
+                const metricsRow = document.getElementById('frontier-metrics-row');
+                metricsRow.innerHTML = '';
+                const metricItems = [
+                    { label: '프론티어 포인트', value: result.num_points, color: '#1565c0' },
+                    { label: '소요 시간', value: result.total_elapsed + '초', color: '#455a64' },
+                ];
+                if (result.table_data.length > 0) {
+                    const sharpes = result.table_data.map(d => d.sharpe);
+                    const maxSharpe = Math.max(...sharpes);
+                    const maxSharpeRow = result.table_data[sharpes.indexOf(maxSharpe)];
+                    metricItems.push({ label: '최대 Sharpe', value: maxSharpe.toFixed(4), color: '#ef6c00' });
+                    metricItems.push({ label: '탄젠트 수익률', value: (maxSharpeRow.expected_return * 100).toFixed(4) + '%', color: '#2e7d32' });
+                }
+                metricItems.forEach(item => {
+                    const col = document.createElement('div');
+                    col.className = 'col-md-3 col-sm-6';
+                    col.innerHTML = `<div class="metric-card"><div class="value" style="color:${item.color}">${item.value}</div><div class="label">${item.label}</div></div>`;
+                    metricsRow.appendChild(col);
+                });
+
+                // Table
+                const tbody = document.querySelector('#frontier-table tbody');
+                tbody.innerHTML = '';
+                result.table_data.forEach((row, idx) => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `<td>${idx+1}</td><td>${row.risk_aversion.toFixed(4)}</td><td>${(row.expected_return*100).toFixed(4)}%</td><td>${(row.cvar*100).toFixed(4)}%</td><td>${row.objective.toFixed(6)}</td><td>${row.sharpe.toFixed(4)}</td><td>${(row.volatility*100).toFixed(4)}%</td>`;
+                    tbody.appendChild(tr);
+                });
+
+                // Frontier interpretation
+                let interp = '<div class="small">';
+                if (result.table_data.length > 0) {
+                    const data = result.table_data;
+                    const minCvar = Math.min(...data.map(d => d.cvar));
+                    const maxRet = Math.max(...data.map(d => d.expected_return));
+                    const maxSharpeVal = Math.max(...data.map(d => d.sharpe));
+                    interp += `<p><strong>프론티어 범위:</strong> CVaR ${(minCvar*100).toFixed(4)}% ~ ${(Math.max(...data.map(d=>d.cvar))*100).toFixed(4)}%, 수익률 ${(Math.min(...data.map(d=>d.expected_return))*100).toFixed(4)}% ~ ${(maxRet*100).toFixed(4)}%</p>`;
+                    interp += `<p><strong>탄젠트 포트폴리오:</strong> Sharpe Ratio ${maxSharpeVal.toFixed(4)}로 위험 대비 가장 효율적인 포트폴리오입니다.</p>`;
+                    interp += `<p><strong>해석:</strong> 프론티어 위의 각 점은 해당 위험 수준에서 달성 가능한 최대 수익률을 나타냅니다. 투자자의 위험 선호도에 따라 적절한 포인트를 선택하면 됩니다.</p>`;
+                }
+                interp += '</div>';
+                document.getElementById('frontier-interpretation').innerHTML = interp;
+            } catch (err) {
+                alert('요청 실패: ' + err.message);
+            }
+            hideSpinner();
+        });
+    </script>
+</body>
+</html>
