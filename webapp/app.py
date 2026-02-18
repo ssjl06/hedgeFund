@@ -10,6 +10,7 @@ import json
 import logging
 import traceback
 import time
+from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
@@ -37,6 +38,78 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 DATA_PATH = os.path.join(os.path.dirname(__file__), '..', 'nvidia-cufolio', 'data', 'stock_data', 'sp500.csv')
+
+# S&P 500 tickers (from cufolio utils.download_data)
+SP500_TICKERS = [
+    'A', 'AAPL', 'ABT', 'ACGL', 'ACN', 'ADBE', 'ADI', 'ADM', 'ADP', 'ADSK', 'AEE', 'AEP', 'AES', 'AFL', 'AIG', 'AIZ', 'AJG', 'AKAM', 'ALB', 'ALGN',
+    'ALL', 'AMAT', 'AMD', 'AME', 'AMGN', 'AMT', 'AMZN', 'AON', 'AOS', 'APA', 'APD', 'APH', 'ARE', 'ATO', 'AVB', 'AVY', 'AXON', 'AXP', 'AZO',
+    'BA', 'BAC', 'BALL', 'BAX', 'BBWI', 'BBY', 'BDX', 'BEN', 'BG', 'BIIB', 'BIO', 'BK', 'BKNG', 'BKR', 'BLK', 'BMY', 'BRO', 'BSX', 'BWA', 'BXP',
+    'C', 'CAG', 'CAH', 'CAT', 'CB', 'CBRE', 'CCI', 'CCL', 'CDNS', 'CHD', 'CHRW', 'CI', 'CINF', 'CL', 'CLX', 'CMA', 'CMCSA', 'CME', 'CMI', 'CMS',
+    'CNC', 'CNP', 'COF', 'COO', 'COP', 'COR', 'COST', 'CPB', 'CPRT', 'CPT', 'CRL', 'CRM', 'CSCO', 'CSGP', 'CSX', 'CTAS', 'CTRA', 'CTSH', 'CVS', 'CVX',
+    'D', 'DD', 'DE', 'DECK', 'DGX', 'DHI', 'DHR', 'DIS', 'DLR', 'DLTR', 'DOC', 'DOV', 'DPZ', 'DRI', 'DTE', 'DUK', 'DVA', 'DVN',
+    'EA', 'EBAY', 'ECL', 'ED', 'EFX', 'EG', 'EIX', 'EL', 'ELV', 'EMN', 'EMR', 'EOG', 'EQIX', 'EQR', 'EQT', 'ES', 'ESS', 'ETN', 'ETR', 'EVRG',
+    'EW', 'EXC', 'EXPD', 'EXR', 'F', 'FAST', 'FCX', 'FDS', 'FDX', 'FE', 'FFIV', 'FI', 'FICO', 'FIS', 'FITB', 'FMC', 'FRT',
+    'GD', 'GE', 'GEN', 'GILD', 'GIS', 'GL', 'GLW', 'GOOG', 'GOOGL', 'GPC', 'GPN', 'GRMN', 'GS', 'GWW',
+    'HAL', 'HAS', 'HBAN', 'HD', 'HIG', 'HOLX', 'HON', 'HPQ', 'HRL', 'HSIC', 'HST', 'HSY', 'HUBB', 'HUM',
+    'IBM', 'IDXX', 'IEX', 'IFF', 'ILMN', 'INCY', 'INTC', 'INTU', 'IP', 'IPG', 'IRM', 'ISRG', 'IT', 'ITW', 'IVZ',
+    'J', 'JBHT', 'JBL', 'JCI', 'JKHY', 'JNJ', 'JPM', 'K', 'KEY', 'KIM', 'KLAC', 'KMB', 'KMX', 'KO', 'KR',
+    'L', 'LEN', 'LH', 'LHX', 'LIN', 'LKQ', 'LLY', 'LMT', 'LNT', 'LOW', 'LRCX', 'LUV', 'LVS',
+    'MAA', 'MAR', 'MAS', 'MCD', 'MCHP', 'MCK', 'MCO', 'MDLZ', 'MDT', 'MET', 'MGM', 'MHK', 'MKC', 'MKTX', 'MLM', 'MMC', 'MMM', 'MNST', 'MO', 'MOH',
+    'MOS', 'MPWR', 'MRK', 'MS', 'MSFT', 'MSI', 'MTB', 'MTCH', 'MTD', 'MU',
+    'NDAQ', 'NDSN', 'NEE', 'NEM', 'NFLX', 'NI', 'NKE', 'NOC', 'NRG', 'NSC', 'NTAP', 'NTRS', 'NUE', 'NVDA', 'NVR',
+    'O', 'ODFL', 'OKE', 'OMC', 'ON', 'ORCL', 'ORLY', 'OXY',
+    'PAYX', 'PCAR', 'PCG', 'PEG', 'PEP', 'PFE', 'PFG', 'PG', 'PGR', 'PH', 'PHM', 'PKG', 'PLD', 'PNC', 'PNR', 'PNW', 'POOL', 'PPG', 'PPL', 'PRU',
+    'PSA', 'PTC', 'PWR', 'QCOM',
+    'RCL', 'REG', 'REGN', 'RF', 'RHI', 'RJF', 'RL', 'RMD', 'ROK', 'ROL', 'ROP', 'ROST', 'RSG', 'RTX', 'RVTY',
+    'SBAC', 'SBUX', 'SCHW', 'SHW', 'SJM', 'SLB', 'SNA', 'SNPS', 'SO', 'SPG', 'SPGI', 'SRE', 'STE', 'STLD', 'STT', 'STX', 'STZ', 'SWK', 'SWKS', 'SYK',
+    'SYY', 'T', 'TAP', 'TDY', 'TECH', 'TER', 'TFC', 'TFX', 'TGT', 'TJX', 'TMO', 'TPR', 'TRMB', 'TROW', 'TRV', 'TSCO', 'TSN', 'TT', 'TTWO', 'TXN',
+    'TXT', 'TYL', 'UDR', 'UHS', 'UNH', 'UNP', 'UPS', 'URI', 'USB',
+    'VLO', 'VMC', 'VRSN', 'VRTX', 'VTR', 'VTRS', 'VZ',
+    'WAB', 'WAT', 'WDC', 'WEC', 'WELL', 'WFC', 'WM', 'WMB', 'WMT', 'WRB', 'WST', 'WTW', 'WY', 'WYNN',
+    'XEL', 'XOM', 'YUM', 'ZBH', 'ZBRA'
+]
+
+
+def _update_data_if_needed():
+    """Check if sp500.csv needs updating and re-download if necessary."""
+    import yfinance as yf
+
+    today = date.today()
+    need_update = False
+
+    if not os.path.exists(DATA_PATH):
+        need_update = True
+    else:
+        try:
+            df = pd.read_csv(DATA_PATH, index_col=0, parse_dates=True)
+            last_date = df.index.max().date()
+            # Update if data is more than 2 days old
+            if (today - last_date).days > 2:
+                need_update = True
+                logger.info("Data last date: %s, today: %s - update needed", last_date, today)
+            else:
+                logger.info("Data is up to date (last: %s)", last_date)
+        except Exception as e:
+            logger.warning("Failed to read existing data: %s", e)
+            need_update = True
+
+    if need_update:
+        logger.info("Updating S&P 500 data to %s...", today.isoformat())
+        try:
+            data = yf.download(
+                SP500_TICKERS,
+                start="2005-01-01",
+                end=(today + timedelta(days=1)).isoformat(),
+                timeout=60
+            )
+            data = data['Close'].dropna(axis=1)
+            os.makedirs(os.path.dirname(DATA_PATH), exist_ok=True)
+            data.to_csv(DATA_PATH)
+            logger.info("Data updated: %d rows, last date %s", len(data), data.index[-1])
+        except Exception as e:
+            logger.error("Failed to update data: %s", e)
+            if not os.path.exists(DATA_PATH):
+                raise RuntimeError(f"No data available and download failed: {e}")
 
 
 def _get_solver_settings():
@@ -125,30 +198,55 @@ def _build_portfolio_chart(portfolio):
     return fig
 
 
-def _build_backtest_chart(backtester, cut_off_date=None):
-    """Build Plotly chart for backtest results."""
+def _build_backtest_chart(backtest_result, dates, cut_off_date=None):
+    """Build Plotly chart for backtest results.
+
+    Parameters
+    ----------
+    backtest_result : pd.DataFrame
+        DataFrame returned by backtester.backtest_against_benchmarks(),
+        indexed by portfolio name, with columns including
+        'returns', 'cumulative returns', 'sharpe', 'sortino', 'max drawdown'.
+    dates : array-like
+        Date index from the backtest period.
+    cut_off_date : str, optional
+        Date string for train/test split line.
+    """
     fig = go.Figure()
 
-    portfolio_returns = backtester.portfolio_returns
-    if portfolio_returns is not None and len(portfolio_returns) > 0:
-        cum_returns = (1 + portfolio_returns).cumprod()
+    if backtest_result is None or len(backtest_result) == 0:
+        return fig
+
+    date_index = pd.to_datetime(dates)
+    colors = ['blue', 'green', 'orange', 'red', 'purple', 'brown']
+
+    for idx, (name, row) in enumerate(backtest_result.iterrows()):
+        cum_returns = row['cumulative returns']
+        is_main = idx == 0  # First row is the optimized portfolio
+
         fig.add_trace(go.Scatter(
-            x=cum_returns.index, y=cum_returns.values,
-            name='최적화 포트폴리오', line=dict(color='blue', width=2)
+            x=date_index, y=cum_returns,
+            name=name,
+            line=dict(
+                color=colors[idx % len(colors)],
+                width=2 if is_main else 1.5,
+                dash=None if is_main else 'dash'
+            )
         ))
 
-    if hasattr(backtester, 'benchmark_returns_dict') and backtester.benchmark_returns_dict:
-        colors = ['green', 'orange', 'red', 'purple', 'brown']
-        for idx, (name, bench_returns) in enumerate(backtester.benchmark_returns_dict.items()):
-            cum = (1 + bench_returns).cumprod()
-            fig.add_trace(go.Scatter(
-                x=cum.index, y=cum.values,
-                name=name, line=dict(color=colors[idx % len(colors)], dash='dash')
-            ))
-
     if cut_off_date:
-        fig.add_vline(x=cut_off_date, line_dash="dash", line_color="gray",
-                      annotation_text="학습/테스트 분할")
+        cut_off_dt = pd.to_datetime(cut_off_date)
+        fig.add_shape(
+            type="line",
+            x0=cut_off_dt, x1=cut_off_dt,
+            y0=0, y1=1, yref="paper",
+            line=dict(dash="dash", color="gray", width=1.5)
+        )
+        fig.add_annotation(
+            x=cut_off_dt, y=1, yref="paper",
+            text="학습/테스트 분할", showarrow=False,
+            yanchor="bottom", font=dict(size=10, color="gray")
+        )
 
     fig.update_layout(
         title="백테스트: 누적 수익률",
@@ -175,9 +273,25 @@ def _build_allocation_table(portfolio):
     return rows
 
 
+def _get_default_dates():
+    """Return default date strings based on today."""
+    today = date.today()
+    today_str = today.isoformat()
+    # Training start: 3 years before today
+    start_str = (today - timedelta(days=3*365)).isoformat()
+    # Test start: 6 months before today
+    test_start_str = (today - timedelta(days=180)).isoformat()
+    return today_str, start_str, test_start_str
+
+
 @app.route('/')
 def index():
-    return render_template('index.html', has_gpu=_HAS_CUOPT)
+    today_str = date.today().isoformat()
+    defaults = _get_default_dates()
+    return render_template('index.html', has_gpu=_HAS_CUOPT,
+                           today=today_str,
+                           default_start=defaults[1],
+                           default_test_start=defaults[2])
 
 
 @app.route('/api/optimize', methods=['POST'])
@@ -187,8 +301,10 @@ def optimize():
         data = request.get_json()
         logger.info("Optimize request: %s", json.dumps(data, default=str))
 
-        start_date = data.get('start_date', '2021-01-01')
-        end_date = data.get('end_date', '2024-01-01')
+        today_str, default_start, default_test_start = _get_default_dates()
+
+        start_date = data.get('start_date', default_start)
+        end_date = data.get('end_date', today_str)
         confidence = float(data.get('confidence', 0.95))
         risk_aversion = float(data.get('risk_aversion', 1.0))
         w_min = _parse_weight_bounds(data.get('w_min'), -0.3)
@@ -205,14 +321,13 @@ def optimize():
         return_type = data.get('return_type', 'LOG')
 
         # Test period for backtest
-        test_start = data.get('test_start', '2023-09-01')
-        test_end = data.get('test_end', '2024-07-01')
+        test_start = data.get('test_start', default_test_start)
+        test_end = data.get('test_end', today_str)
 
         t0 = time.time()
 
-        # Ensure data exists
-        if not os.path.exists(DATA_PATH):
-            utils.download_data(DATA_PATH)
+        # Ensure data is up to date
+        _update_data_if_needed()
 
         regime_dict = {"name": "user_regime", "range": (start_date, end_date)}
         returns_compute_settings = {'return_type': return_type, 'freq': 1}
@@ -263,7 +378,12 @@ def optimize():
                 plot_returns=False, cut_off_date=end_date
             )
 
-            backtest_fig = _build_backtest_chart(backtester_obj, cut_off_date=end_date)
+            # Build chart from backtest_result DataFrame and backtester dates
+            backtest_fig = _build_backtest_chart(
+                backtest_result,
+                dates=backtester_obj._dates,
+                cut_off_date=end_date
+            )
             backtest_chart_json = json.loads(plotly.io.to_json(backtest_fig))
 
             if backtest_result is not None and len(backtest_result) > 0:
@@ -273,10 +393,13 @@ def optimize():
                     val = row[col]
                     if isinstance(val, (np.floating, float)):
                         backtest_metrics[col] = round(float(val), 6)
+                    elif isinstance(val, np.ndarray):
+                        # Skip array columns (returns, cumulative returns)
+                        continue
                     else:
                         backtest_metrics[col] = str(val)
         except Exception as e:
-            logger.warning("Backtest failed: %s", e)
+            logger.warning("Backtest failed: %s\n%s", e, traceback.format_exc())
 
         response = {
             'success': True,
@@ -309,8 +432,10 @@ def frontier():
         data = request.get_json()
         logger.info("Frontier request: %s", json.dumps(data, default=str))
 
+        today_str = date.today().isoformat()
+
         start_date = data.get('start_date', '2022-01-01')
-        end_date = data.get('end_date', '2024-07-01')
+        end_date = data.get('end_date', today_str)
         confidence = float(data.get('confidence', 0.95))
         w_min = float(data.get('w_min', 0.0))
         w_max = float(data.get('w_max', 1.0))
@@ -329,8 +454,8 @@ def frontier():
 
         t0 = time.time()
 
-        if not os.path.exists(DATA_PATH):
-            utils.download_data(DATA_PATH)
+        # Ensure data is up to date
+        _update_data_if_needed()
 
         regime_dict = {"name": "ef_regime", "range": (start_date, end_date)}
         returns_compute_settings = {'return_type': return_type, 'freq': 1}
@@ -384,7 +509,7 @@ def frontier():
                 y=results_df['return'].values,
                 mode='lines+markers',
                 name='효율적 프론티어',
-                text=[f"λ={ra:.4f}" for ra in results_df['risk_aversion']],
+                text=[f"lambda={ra:.4f}" for ra in results_df['risk_aversion']],
                 hovertemplate="CVaR: %{x:.6f}<br>수익률: %{y:.6f}<br>%{text}<extra></extra>",
                 line=dict(color='blue', width=2),
                 marker=dict(size=6)
@@ -470,4 +595,7 @@ def frontier():
 
 
 if __name__ == '__main__':
+    # Update data on startup
+    logger.info("Checking S&P 500 data on startup...")
+    _update_data_if_needed()
     app.run(host='0.0.0.0', port=5000, debug=True)

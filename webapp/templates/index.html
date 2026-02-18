@@ -75,11 +75,11 @@
                                     <div class="row g-2 mb-3">
                                         <div class="col-6">
                                             <label class="form-label">시작일</label>
-                                            <input type="date" class="form-control form-control-sm" name="start_date" value="2021-01-01">
+                                            <input type="date" class="form-control form-control-sm" name="start_date" value="{{ default_start }}">
                                         </div>
                                         <div class="col-6">
                                             <label class="form-label">종료일</label>
-                                            <input type="date" class="form-control form-control-sm" name="end_date" value="2024-01-01">
+                                            <input type="date" class="form-control form-control-sm" name="end_date" value="{{ today }}">
                                         </div>
                                     </div>
 
@@ -152,11 +152,11 @@
                                     <div class="row g-2 mb-3">
                                         <div class="col-6">
                                             <label class="form-label">테스트 시작</label>
-                                            <input type="date" class="form-control form-control-sm" name="test_start" value="2023-09-01">
+                                            <input type="date" class="form-control form-control-sm" name="test_start" value="{{ default_test_start }}">
                                         </div>
                                         <div class="col-6">
                                             <label class="form-label">테스트 종료</label>
-                                            <input type="date" class="form-control form-control-sm" name="test_end" value="2024-07-01">
+                                            <input type="date" class="form-control form-control-sm" name="test_end" value="{{ today }}">
                                         </div>
                                     </div>
 
@@ -220,7 +220,7 @@
                                         </div>
                                         <div class="col-6">
                                             <label class="form-label">종료일</label>
-                                            <input type="date" class="form-control form-control-sm" name="end_date" value="2024-07-01">
+                                            <input type="date" class="form-control form-control-sm" name="end_date" value="{{ today }}">
                                         </div>
                                     </div>
 
