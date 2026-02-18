@@ -159,7 +159,7 @@ def _parse_weight_bounds(val, default):
 
 
 def _build_portfolio_chart(portfolio):
-    """Build Plotly chart for portfolio allocation."""
+    """Build Plotly horizontal bar chart for portfolio allocation."""
     weights = portfolio.weights
     tickers = portfolio.tickers
     cash = portfolio.cash
@@ -172,29 +172,34 @@ def _build_portfolio_chart(portfolio):
         labels.append('Cash')
         vals.append(cash)
 
-    long_labels = [l for l, v in zip(labels, vals) if v > 0]
-    long_vals = [v for v in vals if v > 0]
-    short_labels = [l for l, v in zip(labels, vals) if v < 0]
-    short_vals = [abs(v) for v in vals if v < 0]
+    # Sort by weight descending
+    sorted_pairs = sorted(zip(labels, vals), key=lambda x: x[1])
+    labels = [p[0] for p in sorted_pairs]
+    vals = [p[1] for p in sorted_pairs]
+    pcts = [v * 100 for v in vals]
+    colors = ['#1565c0' if v >= 0 else '#c62828' for v in vals]
 
-    fig = make_subplots(rows=1, cols=2 if short_vals else 1,
-                        specs=[[{"type": "pie"}] * (2 if short_vals else 1)],
-                        subplot_titles=["롱 포지션"] + (["숏 포지션"] if short_vals else []))
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        y=labels, x=pcts, orientation='h',
+        marker=dict(color=colors),
+        text=[f'{p:+.1f}%' for p in pcts],
+        textposition='outside',
+        textfont=dict(size=11),
+        hovertemplate='%{y}: %{x:.2f}%<extra></extra>'
+    ))
 
-    fig.add_trace(go.Pie(
-        labels=long_labels, values=long_vals,
-        textinfo='label+percent', hole=0.3,
-        marker=dict(colors=[f'hsl({210 + i * 15}, 70%, {50 + i * 3}%)' for i in range(len(long_labels))])
-    ), row=1, col=1)
-
-    if short_vals:
-        fig.add_trace(go.Pie(
-            labels=short_labels, values=short_vals,
-            textinfo='label+percent', hole=0.3,
-            marker=dict(colors=[f'hsl({0 + i * 20}, 70%, 55%)' for i in range(len(short_labels))])
-        ), row=1, col=2)
-
-    fig.update_layout(title_text="포트폴리오 배분", height=400, showlegend=True)
+    chart_height = max(300, len(labels) * 28 + 80)
+    fig.update_layout(
+        title_text="포트폴리오 배분",
+        xaxis_title="비중 (%)",
+        height=chart_height,
+        margin=dict(l=60, r=40, t=40, b=30),
+        showlegend=False,
+        template="plotly_white",
+        xaxis=dict(zeroline=True, zerolinewidth=1, zerolinecolor='gray'),
+        yaxis=dict(tickfont=dict(size=11)),
+    )
     return fig
 
 

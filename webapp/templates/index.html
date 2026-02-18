@@ -28,6 +28,30 @@
         table.result-table { font-size: 0.85rem; }
         .result-table th { background: #e8eaf6; }
         #results-section, #frontier-results-section { display: none; }
+        .table-responsive-wrapper { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+        /* Mobile responsive */
+        @media (max-width: 767.98px) {
+            .hero { padding: 1.5rem 0; }
+            .hero h1 { font-size: 1.4rem; }
+            .hero .lead { font-size: 0.85rem; }
+            .container.my-4 { padding-left: 0.75rem; padding-right: 0.75rem; }
+            .nav-pills { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
+            .nav-pills .nav-item { flex-shrink: 0; }
+            .nav-pills .nav-link { font-size: 0.85rem; padding: 0.4rem 0.8rem; }
+            .metric-card { padding: 0.6rem 0.4rem; }
+            .metric-card .value { font-size: 1.1rem; }
+            .metric-card .label { font-size: 0.7rem; }
+            .card-body { padding: 0.75rem; }
+            .form-label { font-size: 0.8rem; }
+            .form-control-sm, .form-select-sm { font-size: 0.8rem; }
+            .theory-section { padding: 1rem; }
+            .theory-section h3 { font-size: 1.2rem; }
+            .theory-section h5 { font-size: 1rem; }
+            .math-block { font-size: 0.75rem; padding: 0.75rem; }
+            table.result-table { font-size: 0.75rem; }
+            .result-table th, .result-table td { padding: 0.3rem 0.4rem; white-space: nowrap; }
+        }
     </style>
 </head>
 <body>
@@ -177,7 +201,7 @@
                             </div>
                             <div class="card mb-3">
                                 <div class="card-header bg-light">자산 배분 상세</div>
-                                <div class="card-body" style="max-height: 400px; overflow-y: auto;">
+                                <div class="card-body table-responsive-wrapper" style="max-height: 400px; overflow-y: auto;">
                                     <table class="table table-sm table-striped result-table" id="allocation-table">
                                         <thead><tr><th>티커</th><th>가중치</th><th>비율 (%)</th><th>포지션</th></tr></thead>
                                         <tbody></tbody>
@@ -301,7 +325,7 @@
                             <div class="row g-3 mb-3" id="frontier-metrics-row"></div>
                             <div class="card mb-3">
                                 <div class="card-header bg-light">프론티어 데이터</div>
-                                <div class="card-body" style="max-height: 400px; overflow-y: auto;">
+                                <div class="card-body table-responsive-wrapper" style="max-height: 400px; overflow-y: auto;">
                                     <table class="table table-sm table-striped result-table" id="frontier-table">
                                         <thead><tr>
                                             <th>#</th><th>위험 회피 (lambda)</th><th>기대 수익률</th>
@@ -508,7 +532,7 @@
             ];
             items.forEach(item => {
                 const col = document.createElement('div');
-                col.className = 'col-md-2 col-sm-4';
+                col.className = 'col-4 col-md-2';
                 col.innerHTML = `<div class="metric-card"><div class="value" style="color:${item.color}">${item.value}</div><div class="label">${item.label}</div></div>`;
                 container.appendChild(col);
             });
@@ -558,7 +582,9 @@
                 document.getElementById('results-section').style.display = 'block';
 
                 renderMetrics(result.results, 'metrics-row');
-                Plotly.newPlot('portfolio-chart', result.portfolio_chart.data, result.portfolio_chart.layout, {responsive: true});
+                const plotlyConfig = {responsive: true, displayModeBar: window.innerWidth > 768, scrollZoom: false};
+                const mobileLayout = window.innerWidth <= 768 ? {margin: {l: 30, r: 10, t: 40, b: 30}, font: {size: 10}, legend: {orientation: 'h', y: -0.2}} : {};
+                Plotly.newPlot('portfolio-chart', result.portfolio_chart.data, Object.assign({}, result.portfolio_chart.layout, mobileLayout), plotlyConfig);
 
                 // Allocation table
                 const tbody = document.querySelector('#allocation-table tbody');
@@ -571,7 +597,7 @@
 
                 // Backtest
                 if (result.backtest_chart) {
-                    Plotly.newPlot('backtest-chart', result.backtest_chart.data, result.backtest_chart.layout, {responsive: true});
+                    Plotly.newPlot('backtest-chart', result.backtest_chart.data, Object.assign({}, result.backtest_chart.layout, mobileLayout), plotlyConfig);
                 }
                 if (result.backtest_metrics) {
                     const bm = result.backtest_metrics;
@@ -615,7 +641,9 @@
                 document.getElementById('no-frontier-results').style.display = 'none';
                 document.getElementById('frontier-results-section').style.display = 'block';
 
-                Plotly.newPlot('frontier-chart', result.frontier_chart.data, result.frontier_chart.layout, {responsive: true});
+                const fPlotlyConfig = {responsive: true, displayModeBar: window.innerWidth > 768, scrollZoom: false};
+                const fMobileLayout = window.innerWidth <= 768 ? {margin: {l: 30, r: 10, t: 40, b: 30}, font: {size: 10}, legend: {orientation: 'h', y: -0.2}} : {};
+                Plotly.newPlot('frontier-chart', result.frontier_chart.data, Object.assign({}, result.frontier_chart.layout, fMobileLayout), fPlotlyConfig);
 
                 // Metrics row
                 const metricsRow = document.getElementById('frontier-metrics-row');
@@ -633,7 +661,7 @@
                 }
                 metricItems.forEach(item => {
                     const col = document.createElement('div');
-                    col.className = 'col-md-3 col-sm-6';
+                    col.className = 'col-6 col-md-3';
                     col.innerHTML = `<div class="metric-card"><div class="value" style="color:${item.color}">${item.value}</div><div class="label">${item.label}</div></div>`;
                     metricsRow.appendChild(col);
                 });
